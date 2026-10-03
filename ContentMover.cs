@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.1.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.2.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -238,6 +238,7 @@ namespace ContentMover {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandle(string name);
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
@@ -377,7 +378,11 @@ namespace ContentMover {
         public readonly TextBox TitleBox = new TextBox();
         public CheckBox ConfirmationBox;
         public Button SaveButton;
+        readonly System.Windows.Forms.Timer focusRetry=new System.Windows.Forms.Timer{Interval=80};
+        readonly bool needsTitle;
+        bool inputReady;int focusAttempts;
         public NoteDialog(Clip clip, string output) {
+            needsTitle=clip.RequiresTitle;
             Icon = AppIcon.Load();
             Text = "内容迁移 · 添加备注"; Font = new Font("Microsoft YaHei UI", 9); AutoScaleMode = AutoScaleMode.Dpi;
             Size = new Size(650, 645); MinimumSize = new Size(560, 570); StartPosition = FormStartPosition.CenterScreen;
@@ -427,7 +432,23 @@ namespace ContentMover {
             layout.Controls.Add(titleLabel,0,1); layout.Controls.Add(TitleBox,0,2);
             Controls.Add(layout); CancelButton = cancel; KeyPreview = true;
             KeyDown += delegate(object sender, KeyEventArgs e) { if (e.Control && e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; save.PerformClick(); } };
-            Shown += delegate { if (clip.RequiresTitle) TitleBox.Focus(); else NoteBox.Focus(); };
+            Shown += delegate { FocusInitialInput();if(!inputReady)focusRetry.Start(); };
+            focusRetry.Tick+=delegate{FocusInitialInput();if(inputReady || ++focusAttempts>=3)focusRetry.Stop();};
+            FormClosed+=delegate{focusRetry.Dispose();};
+        }
+        public void FocusInitialInput() {
+            if(inputReady || IsDisposed || !Visible)return;
+            TextBox target=needsTitle ? TitleBox : NoteBox;
+            uint unusedPid;uint foregroundThread=Native.GetWindowThreadProcessId(Native.GetForegroundWindow(),out unusedPid);
+            uint ownThread=Native.GetCurrentThreadId();bool attached=false;
+            try {
+                // The floating entry deliberately leaves the source active. Transfer actual Windows
+                // keyboard ownership as well as WinForms' logical focus when opening the editor.
+                if(foregroundThread!=0 && foregroundThread!=ownThread)attached=Native.AttachThreadInput(ownThread,foregroundThread,true);
+                Native.SetForegroundWindow(Handle);Activate();ActiveControl=target;target.Select();target.Focus();
+                if(Native.GetForegroundWindow()==Handle)Native.SetFocus(target.Handle);
+            }finally{if(attached)Native.AttachThreadInput(ownThread,foregroundThread,false);}
+            inputReady=Native.GetForegroundWindow()==Handle && target.Focused;
         }
     }
     sealed class Controller : Form {
@@ -725,6 +746,7 @@ namespace ContentMover {
                     }
                 }
                 if (args.Length > 0 && args[0] == "--self-test") { SelfTest(); return; }
+                if (args.Length > 0 && args[0] == "--focus-test") { FocusTest(); return; }
                 if (args.Length > 0 && args[0] == "--render-test") { RenderTest(); return; }
                 if (args.Length > 0 && args[0] == "--integration-test") { IntegrationTest(); return; }
                 bool created;
@@ -772,6 +794,31 @@ namespace ContentMover {
             }
         }
         static void Assert(bool condition, string message) { if (!condition) throw new Exception("TEST FAILED: " + message); }
+        static void FocusTest() {
+            Process fixture=null;
+            try {
+                fixture=Process.Start(new ProcessStartInfo(Application.ExecutablePath,"--fixture"){UseShellExecute=false,WindowStyle=ProcessWindowStyle.Normal});
+                var wait=Stopwatch.StartNew();while(fixture.MainWindowHandle==IntPtr.Zero && wait.ElapsedMilliseconds<3000){Application.DoEvents();Thread.Sleep(40);fixture.Refresh();}
+                IntPtr source=fixture.MainWindowHandle;Assert(source!=IntPtr.Zero,"测试来源窗口启动");
+                foreach(bool title in new[]{false,true}) {
+                    uint unusedPid;uint other=Native.GetWindowThreadProcessId(Native.GetForegroundWindow(),out unusedPid),own=Native.GetCurrentThreadId();
+                    bool attached=other!=own && Native.AttachThreadInput(own,other,true);
+                    try{Native.SetForegroundWindow(source);}finally{if(attached)Native.AttachThreadInput(own,other,false);}
+                    using(var editor=new NoteDialog(new Clip{Text="测试原文",RequiresTitle=title},Path.Combine(TestFolder(),"focus-output.txt"))) {
+                        editor.Show();var clock=Stopwatch.StartNew();while(clock.ElapsedMilliseconds<400){Application.DoEvents();Thread.Sleep(10);}
+                        TextBox target=title ? editor.TitleBox : editor.NoteBox;
+                        Assert(Native.GetForegroundWindow()==editor.Handle,"弹窗取得前台键盘所有权");
+                        var info=new Native.GUIINFO{size=(uint)Marshal.SizeOf(typeof(Native.GUIINFO))};Native.GetGUIThreadInfo(Native.GetCurrentThreadId(),ref info);
+                        Assert(info.focus==target.Handle,"系统焦点位于正确的输入框");
+                        var inputs=new[]{new Native.INPUT{type=1,u=new Native.INPUTUNION{ki=new Native.KEYBOARD{scan=0x78,flags=4}}},new Native.INPUT{type=1,u=new Native.INPUTUNION{ki=new Native.KEYBOARD{scan=0x78,flags=6}}}};
+                        Assert(Native.SendInput(2,inputs,Marshal.SizeOf(typeof(Native.INPUT)))==2,"发送测试字符");
+                        clock.Restart();while(clock.ElapsedMilliseconds<120){Application.DoEvents();Thread.Sleep(10);}
+                        Assert(target.Text=="x","直接键入进入弹窗输入框");editor.Close();
+                    }
+                }
+                File.WriteAllText(Path.Combine(TestFolder(),"focus-test.txt"),"PASS: foreground transfer from separate process; OS focus; typed character reaches note and required-title fields.");
+            }finally{if(fixture!=null && !fixture.HasExited)fixture.CloseMainWindow();}
+        }
         static void SelfTest() {
             string folder = TestFolder(), path = Path.Combine(folder, "storage-" + Guid.NewGuid().ToString("N") + ".txt");
             string outputTest=Path.Combine(folder,"dated-output-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(outputTest);
