@@ -1,0 +1,8 @@
+config.json
+browser-extension/pairing.js
+test-results/
+*.log
+*.exe
+github-publish/
+dist/
+tools/
