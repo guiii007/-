@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -215,11 +216,37 @@ namespace ContentMover {
         public event Action Chosen;
         public FloatingButton() {
             FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; TopMost = true;
-            AutoScaleMode = AutoScaleMode.Dpi; ClientSize = new Size(154, 42); BackColor = Color.FromArgb(34, 95, 175);
-            var button = new Button { Text = "内容迁移  ↗", Dock = DockStyle.Fill, FlatStyle = FlatStyle.Flat,
-                ForeColor = Color.White, BackColor = BackColor, Font = new Font("Microsoft YaHei UI", 10), Cursor = Cursors.Hand };
-            button.FlatAppearance.BorderSize = 0; button.Click += delegate { if (Chosen != null) Chosen(); }; Controls.Add(button);
+            AutoScaleMode = AutoScaleMode.None; BackColor = Color.FromArgb(34, 95, 175);
+            Font=new Font("Microsoft YaHei UI",10); ForeColor=Color.White; Cursor=Cursors.Hand; Text="内容迁移";
+            DoubleBuffered=true;
+            using(var graphics=CreateGraphics()) using(var caption=CaptionPath(graphics)) {
+                var bounds=caption.GetBounds(); float scale=graphics.DpiY/96f;
+                // Measure visible glyphs, not a fixed button width or invisible font side bearings.
+                ClientSize=new Size((int)Math.Ceiling(bounds.Width+8*scale+11.6f*scale+20*scale),
+                    (int)Math.Ceiling(Math.Max(bounds.Height,11.6f*scale)+16*scale));
+            }
         }
+        GraphicsPath CaptionPath(Graphics graphics) {
+            var path=new GraphicsPath(); path.AddString("内容迁移",Font.FontFamily,(int)Font.Style,
+                Font.SizeInPoints*graphics.DpiY/72f,PointF.Empty,StringFormat.GenericTypographic); return path;
+        }
+        protected override void OnPaint(PaintEventArgs e) {
+            base.OnPaint(e); var graphics=e.Graphics; graphics.SmoothingMode=SmoothingMode.AntiAlias;
+            float scale=graphics.DpiY/96f;
+            using(var path=CaptionPath(graphics)) {
+                var bounds=path.GetBounds();float groupWidth=bounds.Width+19.6f*scale;
+                float padding=(ClientSize.Width-groupWidth)/2f;
+                using(var matrix=new Matrix()){matrix.Translate(padding-bounds.Left,(ClientSize.Height-bounds.Height)/2f-bounds.Top);path.Transform(matrix);}
+                using(var brush=new SolidBrush(ForeColor))graphics.FillPath(brush,path);
+                float x=padding+bounds.Width+8.8f*scale, y=(ClientSize.Height-10*scale)/2f;
+                using(var pen=new Pen(ForeColor,1.6f*scale)) {
+                    pen.StartCap=pen.EndCap=LineCap.Round;pen.LineJoin=LineJoin.Round;
+                    graphics.DrawLine(pen,x,y+10*scale,x+10*scale,y);
+                    graphics.DrawLines(pen,new PointF[]{new PointF(x+4*scale,y),new PointF(x+10*scale,y),new PointF(x+10*scale,y+6*scale)});
+                }
+            }
+        }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); if(e.Button==MouseButtons.Left && Chosen!=null)Chosen(); }
         protected override bool ShowWithoutActivation { get { return true; } }
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x08000000 | 0x80; return cp; } }
         protected override void WndProc(ref Message message) {
@@ -653,6 +680,9 @@ namespace ContentMover {
         }
         static string TestFolder() { string folder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-results"); Directory.CreateDirectory(folder); return folder; }
         static void RenderTest() {
+            using(var entry=new FloatingButton()) {
+                using(var bitmap=new Bitmap(entry.Width,entry.Height)){entry.DrawToBitmap(bitmap,new Rectangle(Point.Empty,entry.Size));bitmap.Save(Path.Combine(TestFolder(),"floating-entry.png"));}
+            }
             var clip = new Clip { Text = FixtureText, App = "示例应用", Title = "原文和备注预览", Source = "D:\\文档\\示例.docx" };
             using (var dialog = new NoteDialog(clip, "桌面\\内容迁移.txt")) {
                 dialog.NoteBox.Text = "这段内容解释了关键概念，准备在后续研究中引用。";
