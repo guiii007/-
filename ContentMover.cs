@@ -4,8 +4,6 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
-using System.Net;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -13,6 +11,8 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
+[assembly: System.Reflection.AssemblyProduct("内容迁移")]
+[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -32,13 +32,26 @@ namespace ContentMover {
     }
     static class SelectionReader {
         static readonly SemaphoreSlim Workers = new SemaphoreSlim(2, 2);
-        public static Task<string> Start(IntPtr hwnd, Point? point) {
-            var result = new TaskCompletionSource<string>();
-            if (!Workers.Wait(0)) { result.SetResult(""); return result.Task; }
-            var thread = new Thread(delegate() {
-                try { result.TrySetResult(Read(hwnd, point)); } catch { result.TrySetResult(""); } finally { Workers.Release(); }
-            });
-            thread.IsBackground = true; thread.SetApartmentState(ApartmentState.STA); thread.Start(); return result.Task;
+        public static async Task<SelectionResult> Start(IntPtr hwnd, Point? point, CancellationToken cancellation = default(CancellationToken)) {
+            try { await Workers.WaitAsync(cancellation); } catch(OperationCanceledException) {return new SelectionResult();}
+            try {
+                return await Task.Run(delegate {
+                    if(cancellation.IsCancellationRequested)return new SelectionResult();
+                    var info=new ProcessStartInfo(Application.ExecutablePath,"--selection-probe " + hwnd.ToInt64() + " " +
+                        (point.HasValue ? point.Value.X + " " + point.Value.Y : "none")) {
+                        UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,
+                        RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=Encoding.UTF8
+                    };
+                    using(var worker=Process.Start(info)) {
+                        var output=worker.StandardOutput.ReadToEndAsync();
+                        using(cancellation.Register(delegate {try{if(!worker.HasExited)worker.Kill();}catch{}})) {
+                            if(!worker.WaitForExit(2200)){try{worker.Kill();}catch{}worker.WaitForExit();return new SelectionResult();}
+                            if(cancellation.IsCancellationRequested || worker.ExitCode!=0)return new SelectionResult();
+                            try{return new JavaScriptSerializer().Deserialize<SelectionResult>(output.GetAwaiter().GetResult()) ?? new SelectionResult();}catch{return new SelectionResult();}
+                        }
+                    }
+                });
+            } catch {return new SelectionResult();} finally {Workers.Release();}
         }
         static string Selected(AutomationElement element, uint pid) {
             try {
@@ -52,6 +65,7 @@ namespace ContentMover {
         }
         static string Read(IntPtr hwnd, Point? point) {
             uint pid = Native.Pid(hwnd); if (pid == 0) return "";
+            string native=Native.SelectedEditText(hwnd);if(native.Length>0)return native;
             var candidates = new List<AutomationElement>();
             if (point.HasValue) try { candidates.Add(AutomationElement.FromPoint(new System.Windows.Point(point.Value.X, point.Value.Y))); } catch { }
             try { candidates.Add(AutomationElement.FocusedElement); } catch { }
@@ -81,10 +95,41 @@ namespace ContentMover {
             }
             return "";
         }
+        public static SelectionResult Probe(IntPtr hwnd,Point? point) {
+            var result=new SelectionResult();
+            try {result.Text=Read(hwnd,point);if(result.Text.Length>0){result.HasSelection=true;return result;}}catch{}
+            result.HasSelection=ContextCopyEnabled(hwnd,point);return result;
+        }
+        static bool ContextCopyEnabled(IntPtr hwnd,Point? point) {
+            uint pid=Native.Pid(hwnd);if(pid==0)return false;
+            string app="";try{app=Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();}catch{return false;}
+            if(app=="explorer")return false;
+            bool textApp=app=="msedge" || app=="chrome" || app=="firefox" || app=="brave" || app=="winword" ||
+                app=="notepad" || app.Contains("deepseek") || app=="chatgpt" || app=="codex";
+            if(!textApp)return false;
+            try {
+                var roots=new List<AutomationElement>{AutomationElement.FromHandle(hwnd)};
+                var menus=AutomationElement.RootElement.FindAll(TreeScope.Children,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Menu));
+                foreach(AutomationElement menu in menus)if(menu.Current.ProcessId==(int)pid && !menu.Current.IsOffscreen)roots.Add(menu);
+                if(point.HasValue) {
+                    var hit=AutomationElement.FromPoint(new System.Windows.Point(point.Value.X+20,point.Value.Y+20));
+                    for(int i=0;hit!=null && i<8;i++){if(hit.Current.ControlType==ControlType.Menu && hit.Current.ProcessId==(int)pid){roots.Add(hit);break;}hit=TreeWalker.RawViewWalker.GetParent(hit);}
+                }
+                foreach(var root in roots) {
+                    var items=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.MenuItem));
+                    foreach(AutomationElement item in items) {
+                        string name=item.Current.Name.Trim();int tab=name.IndexOf('\t');if(tab>=0)name=name.Substring(0,tab).Trim();
+                        bool copy=System.Text.RegularExpressions.Regex.IsMatch(name.Replace("&",""),@"^(复制|Copy)\s*(\([cC]\))?(\s+Ctrl\+C)?$",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                        if(copy && item.Current.IsEnabled && !item.Current.IsOffscreen)return true;
+                    }
+                }
+            }catch{}
+            return false;
+        }
     }
+    public sealed class SelectionResult { public string Text=""; public bool HasSelection; }
     public sealed class Settings {
         public string OutputPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "内容迁移.txt");
-        public string Token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
         public bool RightClickEnabled = true;
     }
     public sealed class Clip {
@@ -167,6 +212,8 @@ namespace ContentMover {
         public delegate IntPtr HookProc(int code, IntPtr wp, IntPtr lp);
         [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
         [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)] public struct GUIINFO {public uint size,flags;public IntPtr active,focus,capture,menu,move,caret;public RECT caretRect;}
+        [StructLayout(LayoutKind.Sequential)] public struct MSG {public IntPtr hwnd;public uint message;public UIntPtr wp;public IntPtr lp;public uint time;public POINT point;}
         [StructLayout(LayoutKind.Sequential)] public struct MOUSE { public POINT pt; public uint data, flags, time; public UIntPtr extra; }
         [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public INPUTUNION u; }
         [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION {
@@ -198,6 +245,34 @@ namespace ContentMover {
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern uint RegisterWindowMessage(string name);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string className, string title);
         [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wp, IntPtr lp);
+        [DllImport("user32.dll")] public static extern bool PostThreadMessage(uint thread,uint message,IntPtr wp,IntPtr lp);
+        [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
+        [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd,uint flags);
+        [DllImport("user32.dll")] public static extern bool PeekMessage(out MSG message,IntPtr window,uint min,uint max,uint flags);
+        [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint thread,ref GUIINFO info);
+        [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr window,StringBuilder name,int max);
+        [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr window,int index);
+        [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern IntPtr SendMessageTimeout(IntPtr window,uint message,IntPtr wp,IntPtr lp,uint flags,uint timeout,out UIntPtr result);
+        [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageTimeoutW")] static extern IntPtr SendMessageText(IntPtr window,uint message,IntPtr wp,StringBuilder text,uint flags,uint timeout,out UIntPtr result);
+        public static string SelectedEditText(IntPtr hwnd) {
+            uint pid;uint thread=GetWindowThreadProcessId(hwnd,out pid);var info=new GUIINFO{size=(uint)Marshal.SizeOf(typeof(GUIINFO))};
+            var inputClass=new StringBuilder(128);GetClassName(hwnd,inputClass,inputClass.Capacity);
+            if(inputClass.ToString().IndexOf("Edit",StringComparison.OrdinalIgnoreCase)>=0)info.focus=hwnd;
+            else if(!GetGUIThreadInfo(thread,ref info) || info.focus==IntPtr.Zero)return "";
+            var name=new StringBuilder(128);GetClassName(info.focus,name,name.Capacity);
+            if(name.ToString().IndexOf("Edit",StringComparison.OrdinalIgnoreCase)<0 || (GetWindowLong(info.focus,-16)&0x20)!=0)return "";
+            IntPtr start=Marshal.AllocHGlobal(4),end=Marshal.AllocHGlobal(4);
+            try {
+                UIntPtr result;Marshal.WriteInt32(start,0);Marshal.WriteInt32(end,0);
+                if(SendMessageTimeout(info.focus,0xB0,start,end,2,180,out result)==IntPtr.Zero)return "";
+                int a=Marshal.ReadInt32(start),b=Marshal.ReadInt32(end);if(b<=a)return "";
+                if(SendMessageTimeout(info.focus,0xE,IntPtr.Zero,IntPtr.Zero,2,180,out result)==IntPtr.Zero)return "";
+                int count=(int)result.ToUInt64();if(count<=0 || count>2000000)return "";
+                var text=new StringBuilder(count+1);
+                if(SendMessageText(info.focus,0xD,new IntPtr(count+1),text,2,180,out result)==IntPtr.Zero)return "";
+                string full=text.ToString();return b<=full.Length ? full.Substring(a,b-a) : "";
+            }finally{Marshal.FreeHGlobal(start);Marshal.FreeHGlobal(end);}
+        }
         [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint key);
         [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hwnd, int id);
         [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
@@ -211,6 +286,32 @@ namespace ContentMover {
             for (int i = keys.Length - 1; i >= 0; i--) inputs.Add(new INPUT { type = 1, u = new INPUTUNION { ki = new KEYBOARD { key = keys[i], flags = 2 } } });
             return SendInput((uint)inputs.Count, inputs.ToArray(), Marshal.SizeOf(typeof(INPUT))) == inputs.Count;
         }
+    }
+    sealed class MouseMonitor : IDisposable {
+        readonly Thread thread;readonly Action<int,Native.MOUSE,IntPtr> receive;
+        Native.HookProc callback;IntPtr hook;uint threadId;
+        public MouseMonitor(Action<int,Native.MOUSE,IntPtr> handler) {
+            receive=handler;var ready=new ManualResetEvent(false);
+            thread=new Thread(delegate(){
+                threadId=Native.GetCurrentThreadId();callback=OnMouse;Native.MSG ignored;Native.PeekMessage(out ignored,IntPtr.Zero,0,0,0);
+                hook=Native.SetWindowsHookEx(Native.WH_MOUSE_LL,callback,Native.GetModuleHandle(null),0);ready.Set();
+                if(hook!=IntPtr.Zero) {Application.Run();Native.UnhookWindowsHookEx(hook);}
+            });thread.IsBackground=true;thread.SetApartmentState(ApartmentState.STA);thread.Start();
+            if(!ready.WaitOne(2000) || hook==IntPtr.Zero)throw new InvalidOperationException("无法注册鼠标监听。");
+        }
+        IntPtr OnMouse(int code,IntPtr wp,IntPtr lp) {
+            if(code>=0) {
+                int message=wp.ToInt32();
+                if(message==0x201 || message==0x202 || message==0x204 || message==0x205) {
+                    var data=(Native.MOUSE)Marshal.PtrToStructure(lp,typeof(Native.MOUSE));
+                    IntPtr window=Native.GetAncestor(Native.WindowFromPoint(data.pt),2);
+                    if(window==IntPtr.Zero)window=Native.GetForegroundWindow();
+                    try{receive(message,data,window);}catch{}
+                }
+            }
+            return Native.CallNextHookEx(hook,code,wp,lp);
+        }
+        public void Dispose(){if(threadId!=0)Native.PostThreadMessage(threadId,0x12,IntPtr.Zero,IntPtr.Zero);}
     }
     sealed class FloatingButton : Form {
         public event Action Chosen;
@@ -323,17 +424,18 @@ namespace ContentMover {
         readonly Settings settings;
         readonly FloatingButton floating = new FloatingButton();
         readonly NotifyIcon tray;
-        readonly Native.HookProc hookProc;
+        readonly MouseMonitor mouseMonitor;
         readonly System.Windows.Forms.Timer expiry = new System.Windows.Forms.Timer();
-        IntPtr hook, sourceWindow;
+        IntPtr sourceWindow;
         IntPtr selectionWindow;
-        Task<string> selectionTask;
+        Task<SelectionResult> selectionTask;
+        CancellationTokenSource probeCancellation=new CancellationTokenSource();
+        Point leftDown;IntPtr leftWindow;DateTime lastSelectionGesture;
         int selectionGeneration;
         bool busy, shuttingDown;
         public bool TestMode;
         public Action<Clip> TestCaptured;
         public Action<string> TestError;
-        readonly LocalBridge bridge;
         static readonly string ConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
         public static readonly uint SettingsMessage = Native.RegisterWindowMessage("ContentMover.ShowSettings.v2");
         public Controller(Settings config, bool testMode) {
@@ -347,7 +449,6 @@ namespace ContentMover {
             menu.Items.Add("更改保存文件…", null, delegate { ChangeOutput(); });
             var right = new ToolStripMenuItem("右键显示内容迁移") { Checked = settings.RightClickEnabled, CheckOnClick = true };
             right.CheckedChanged += delegate { settings.RightClickEnabled = right.Checked; floating.Hide(); SaveSettings(); }; menu.Items.Add(right);
-            menu.Items.Add("浏览器扩展安装说明", null, delegate { Process.Start(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "使用说明.md")); });
             menu.Items.Add("设置 / 开机自启…", null, delegate { ShowSettings(); });
             var startup = new ToolStripMenuItem("开机自动启动") { Checked = File.Exists(StartupPath()) };
             startup.Click += delegate { try { StartupManager.Set(StartupPath(), Application.ExecutablePath, !startup.Checked); startup.Checked = File.Exists(StartupPath());
@@ -359,48 +460,44 @@ namespace ContentMover {
             tray.BalloonTipClicked += delegate { OpenFile(); };
             floating.Chosen += delegate { CaptureSelection(sourceWindow, true); };
             expiry.Interval = 14000; expiry.Tick += delegate { expiry.Stop(); floating.Hide(); };
-            hookProc = Hook;
-            hook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, hookProc, Native.GetModuleHandle(null), 0);
-            if (hook == IntPtr.Zero) throw new InvalidOperationException("无法注册鼠标右键监听。");
+            mouseMonitor=new MouseMonitor(delegate(int message,Native.MOUSE data,IntPtr window){
+                if(!shuttingDown)try{BeginInvoke(new Action(delegate{OnMouse(message,data,window);}));}catch{}
+            });
             if (!Native.RegisterHotKey(Handle, 1, 0x4003, 0x4D) && !testMode) Notify("快捷键被占用", "右键入口仍可用；Ctrl+Alt+M 已被其他程序占用。");
             if (!testMode) {
-                EnsureOutput(); SaveSettings(); PrepareExtension();
-                bridge = new LocalBridge(settings.Token, delegate(Clip clip) { BeginInvoke(new Action(delegate { EditClip(clip); })); });
-                try { bridge.Start(); } catch (Exception ex) { Notify("浏览器连接未启动", "通用右键仍可使用。" + ex.Message); }
+                EnsureOutput(); SaveSettings();
                 Notify("内容迁移已启动", "选中文字 → 右键 → 蓝色内容迁移按钮。也可按 Ctrl+Alt+M。");
             }
         }
         protected override void SetVisibleCore(bool value) { base.SetVisibleCore(false); }
-        IntPtr Hook(int code, IntPtr wp, IntPtr lp) {
-            if (code >= 0 && !shuttingDown) {
-                int message = wp.ToInt32();
-                if (message == Native.WM_RBUTTONDOWN && settings.RightClickEnabled && !busy) {
-                    selectionGeneration++;
-                    BeginInvoke(new Action(delegate { floating.Hide(); }));
-                    IntPtr hwnd = Native.GetForegroundWindow();
-                    var data = (Native.MOUSE)Marshal.PtrToStructure(lp, typeof(Native.MOUSE));
-                    if (hwnd != IntPtr.Zero && Native.Pid(hwnd) != (uint)Process.GetCurrentProcess().Id) {
-                        selectionWindow = hwnd; selectionTask = null;
-                    }
-                } else if (message == Native.WM_RBUTTONUP && settings.RightClickEnabled && !busy) {
-                    IntPtr hwnd = Native.GetForegroundWindow();
-                    if (TestMode) File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-results", "integration-debug.txt"), "\r\nRightUp foreground=" + hwnd + " title=" + Native.Title(hwnd) + " pid=" + Native.Pid(hwnd));
-                    if (hwnd != IntPtr.Zero && Native.Pid(hwnd) != (uint)Process.GetCurrentProcess().Id) {
-                        var data = (Native.MOUSE)Marshal.PtrToStructure(lp, typeof(Native.MOUSE));
-                        var point = new Point(data.pt.X, data.pt.Y);
-                        int generation=selectionGeneration;
-                        Task<string> task=SelectionReader.Start(hwnd,point);
-                        selectionWindow=hwnd; selectionTask=task;
-                        BeginInvoke(new Action(delegate { ShowForSelection(hwnd,point,task,generation); }));
-                    }
-                } else if (message == Native.WM_LBUTTONDOWN && floating.Visible) {
-                    var data = (Native.MOUSE)Marshal.PtrToStructure(lp, typeof(Native.MOUSE));
-                    if (!floating.Bounds.Contains(data.pt.X, data.pt.Y)) { selectionGeneration++; BeginInvoke(new Action(delegate { floating.Hide(); })); }
-                } else if(message==Native.WM_LBUTTONDOWN) {
-                    selectionGeneration++;
+        void ResetProbe() {
+            probeCancellation.Cancel();probeCancellation=new CancellationTokenSource();selectionTask=null;
+        }
+        void OnMouse(int message,Native.MOUSE data,IntPtr window) {
+            if(shuttingDown || busy)return;
+            var point=new Point(data.pt.X,data.pt.Y);
+            if(message==Native.WM_LBUTTONDOWN) {
+                if(floating.Visible && floating.Bounds.Contains(point))return;
+                selectionGeneration++;floating.Hide();ResetProbe();leftDown=point;leftWindow=window;
+            } else if(message==0x202 && window==leftWindow && Native.Pid(window)!=(uint)Process.GetCurrentProcess().Id) {
+                if(Math.Abs(point.X-leftDown.X)+Math.Abs(point.Y-leftDown.Y)>4) {
+                    selectionWindow=window;lastSelectionGesture=DateTime.UtcNow;
+                    selectionTask=SelectionReader.Start(window,point,probeCancellation.Token);
                 }
+            } else if(message==Native.WM_RBUTTONDOWN && settings.RightClickEnabled) {
+                floating.Hide();
+                if(window==IntPtr.Zero || Native.Pid(window)==(uint)Process.GetCurrentProcess().Id){selectionGeneration++;ResetProbe();selectionWindow=IntPtr.Zero;return;}
+                if(selectionWindow!=window || DateTime.UtcNow-lastSelectionGesture>TimeSpan.FromSeconds(3)) {
+                    selectionGeneration++;ResetProbe();selectionWindow=window;
+                    selectionTask=SelectionReader.Start(window,point,probeCancellation.Token);
+                }
+            } else if(message==Native.WM_RBUTTONUP && settings.RightClickEnabled) {
+                // Use the source captured before the menu opens, rather than its changed foreground window.
+                IntPtr source=selectionWindow;
+                if(source==IntPtr.Zero || Native.Pid(source)==(uint)Process.GetCurrentProcess().Id)return;
+                if(selectionTask==null)selectionTask=SelectionReader.Start(source,point,probeCancellation.Token);
+                ShowForSelection(source,point,selectionTask,selectionGeneration);
             }
-            return Native.CallNextHookEx(hook, code, wp, lp);
         }
         protected override void WndProc(ref Message message) {
             if (message.Msg == Native.WM_HOTKEY && !busy) CaptureSelection(Native.GetForegroundWindow(), false);
@@ -408,18 +505,25 @@ namespace ContentMover {
             base.WndProc(ref message);
         }
         public bool ButtonVisible { get { return floating.Visible; } }
-        public void TestEntry(string text) { ShowForSelection(Handle,new Point(300,300),Task.FromResult(text),selectionGeneration); }
-        async void ShowForSelection(IntPtr hwnd, Point point, Task<string> selection, int generation) {
+        public void TestEntry(string text) { ShowForSelection(Handle,new Point(300,300),Task.FromResult(new SelectionResult{Text=text,HasSelection=text.Length>0}),selectionGeneration); }
+        public void TestDelayedEntry(Task<SelectionResult> result){floating.Hide();ShowForSelection(Handle,new Point(300,300),result,++selectionGeneration);}
+        public void TestInvalidateEntry(){selectionGeneration++;floating.Hide();}
+        async void ShowForSelection(IntPtr hwnd, Point point, Task<SelectionResult> selection, int generation) {
             if(selection==null)return;
             try {
-                if(await Task.WhenAny(selection,Task.Delay(900))!=selection)return;
-                string text=await selection;
-                if(String.IsNullOrEmpty(text) || generation!=selectionGeneration || busy || shuttingDown || !settings.RightClickEnabled)return;
+                var result=await selection;
+                if(!TestMode && !result.HasSelection && generation==selectionGeneration && !shuttingDown && !busy) {
+                    await Task.Delay(100);
+                    if(generation!=selectionGeneration || shuttingDown || busy)return;
+                    selection=SelectionReader.Start(hwnd,point,probeCancellation.Token);selectionTask=selection;
+                    result=await selection;
+                }
+                if(!result.HasSelection || generation!=selectionGeneration || busy || shuttingDown || !settings.RightClickEnabled)return;
                 sourceWindow=hwnd; floating.ShowAt(point); expiry.Stop(); expiry.Start();
             } catch { }
         }
         public Rectangle ButtonBounds { get { return floating.Bounds; } }
-        public void Stop() { Close(); Dispose(); Application.ExitThread(); }
+        public void Stop() { if(!shuttingDown){shuttingDown=true;probeCancellation.Cancel();mouseMonitor.Dispose();}Close();Dispose();Application.ExitThread(); }
         public void ClickCaptureForTest() { CaptureSelection(sourceWindow, true); }
         public async void CaptureSelection(IntPtr hwnd, bool dismissMenu) {
             if (busy || hwnd == IntPtr.Zero || Native.Pid(hwnd) == (uint)Process.GetCurrentProcess().Id) return;
@@ -434,9 +538,9 @@ namespace ContentMover {
             string clipboardFallback = "";
             try {
                 // Read before Escape can collapse a webview selection. Never block the mouse hook.
-                Task<string> selection = dismissMenu && selectionWindow == hwnd && selectionTask != null
+                Task<SelectionResult> selection = dismissMenu && selectionWindow == hwnd && selectionTask != null
                     ? selectionTask : SelectionReader.Start(hwnd, null);
-                if (await Task.WhenAny(selection, Task.Delay(650)) == selection) clip.Text = await selection;
+                clip.Text=(await selection).Text;
                 selectionTask = null;
                 try { if (Clipboard.ContainsText(TextDataFormat.UnicodeText)) clipboardFallback = Clipboard.GetText(TextDataFormat.UnicodeText); } catch (ExternalException) { }
                 try {
@@ -577,77 +681,20 @@ namespace ContentMover {
                 form.Controls.Add(close); form.AcceptButton = close; form.ShowDialog();
             }
         }
-        void PrepareExtension() {
-            string folder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "browser-extension"); Directory.CreateDirectory(folder);
-            File.WriteAllText(Path.Combine(folder, "pairing.js"), "const CONTENT_MOVER_TOKEN = \"" + settings.Token + "\";\n", new UTF8Encoding(false));
-            string image = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "content-mover.png");
-            if (File.Exists(image)) File.Copy(image, Path.Combine(folder, "icon.png"), true);
-        }
         protected override void OnFormClosed(FormClosedEventArgs e) {
-            shuttingDown = true; if (hook != IntPtr.Zero) Native.UnhookWindowsHookEx(hook);
-            Native.UnregisterHotKey(Handle, 1); if (bridge != null) bridge.Dispose();
+            shuttingDown = true; probeCancellation.Cancel();mouseMonitor.Dispose();
+            Native.UnregisterHotKey(Handle, 1);
             expiry.Dispose(); floating.Dispose(); tray.Visible = false; tray.Dispose(); base.OnFormClosed(e);
         }
         public static Settings LoadSettings() {
             if (File.Exists(ConfigPath)) {
                 Settings config = new JavaScriptSerializer().Deserialize<Settings>(File.ReadAllText(ConfigPath));
-                if (config == null || String.IsNullOrWhiteSpace(config.OutputPath) || !Path.IsPathRooted(config.OutputPath) || String.IsNullOrWhiteSpace(config.Token))
+                if (config == null || String.IsNullOrWhiteSpace(config.OutputPath) || !Path.IsPathRooted(config.OutputPath))
                     throw new InvalidDataException("config.json 中的保存路径或浏览器配对信息无效。");
                 return config;
             }
             return new Settings();
         }
-    }
-    // A loopback-only HTTP bridge; no Internet listener, no browser-controlled file paths.
-    sealed class LocalBridge : IDisposable {
-        TcpListener listener; readonly string token; readonly Action<Clip> received;
-        readonly int port;
-        public LocalBridge(string secret, Action<Clip> callback, int listenPort = 19339) { token = secret; received = callback; port = listenPort; }
-        public void Start() {
-            listener = new TcpListener(IPAddress.Loopback, port); listener.Start(8);
-            TcpListener server = listener;
-            var worker = new Thread(delegate() { while (listener != null) {
-                try { var client = server.AcceptTcpClient(); ThreadPool.QueueUserWorkItem(delegate { HandleClient(client); }); }
-                catch (SocketException) { break; } catch (ObjectDisposedException) { break; }
-            } }); worker.IsBackground = true; worker.Start();
-        }
-        void HandleClient(TcpClient client) {
-            using (client) {
-                client.ReceiveTimeout = 2500; client.SendTimeout = 2500;
-                try {
-                    var stream = client.GetStream(); var headerBytes = new List<byte>(); int value;
-                    while ((value = stream.ReadByte()) >= 0) {
-                        headerBytes.Add((byte)value); int n = headerBytes.Count;
-                        if (n > 16384) { Reply(stream, 431, "Headers too large", ""); return; }
-                        if (n >= 4 && headerBytes[n-4] == 13 && headerBytes[n-3] == 10 && headerBytes[n-2] == 13 && headerBytes[n-1] == 10) break;
-                    }
-                    string[] lines = Encoding.ASCII.GetString(headerBytes.ToArray()).Split(new string[] { "\r\n" }, StringSplitOptions.None);
-                    var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    for (int i = 1; i < lines.Length; i++) { int pos = lines[i].IndexOf(':'); if (pos > 0) headers[lines[i].Substring(0, pos)] = lines[i].Substring(pos + 1).Trim(); }
-                    string origin; headers.TryGetValue("Origin", out origin); origin = origin ?? "";
-                    if (origin.Length > 0 && !origin.StartsWith("chrome-extension://", StringComparison.Ordinal)) { Reply(stream, 403, "Origin rejected", ""); return; }
-                    if (lines[0] == "OPTIONS /capture HTTP/1.1") { Reply(stream, 204, "No Content", origin); return; }
-                    string authorization; headers.TryGetValue("Authorization", out authorization);
-                    if (authorization != "Bearer " + token) { Reply(stream, 403, "Authentication required", origin); return; }
-                    if (lines[0] != "POST /capture HTTP/1.1") { Reply(stream, 404, "Not Found", origin); return; }
-                    int length; string lengthText; headers.TryGetValue("Content-Length", out lengthText);
-                    if (!Int32.TryParse(lengthText, out length) || length < 1 || length > 2 * 1024 * 1024) { Reply(stream, 413, "Invalid length", origin); return; }
-                    byte[] data = new byte[length]; int read = 0;
-                    while (read < length) { int count = stream.Read(data, read, length-read); if (count == 0) throw new EndOfStreamException(); read += count; }
-                    var json = new JavaScriptSerializer { MaxJsonLength = 2 * 1024 * 1024 }.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(data));
-                    string text = Field(json, "text"); if (String.IsNullOrEmpty(text)) { Reply(stream, 400, "Empty selection", origin); return; }
-                    var clip = new Clip { Text = text, Title = Field(json, "title"), Source = Field(json, "url"), App = "浏览器扩展", Fidelity = Field(json, "fidelity") };
-                    string frame = Field(json, "frameUrl"); if (frame.Length > 0 && frame != clip.Source) clip.Detail = "选区所在框架：" + frame;
-                    received(clip); Reply(stream, 202, "Accepted", origin);
-                } catch { try { Reply(client.GetStream(), 400, "Bad Request", ""); } catch { } }
-            }
-        }
-        static string Field(Dictionary<string, object> json, string key) { object value; return json.TryGetValue(key, out value) && value is string ? (string)value : ""; }
-        static void Reply(Stream stream, int status, string reason, string origin) {
-            string cors = origin.Length == 0 ? "" : "Access-Control-Allow-Origin: " + origin + "\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
-            byte[] bytes = Encoding.ASCII.GetBytes("HTTP/1.1 " + status + " " + reason + "\r\n" + cors + "Content-Length: 0\r\nConnection: close\r\n\r\n"); stream.Write(bytes, 0, bytes.Length);
-        }
-        public void Dispose() { var current = listener; listener = null; if (current != null) current.Stop(); }
     }
     static class Program {
         public const string FixtureText = "  中文原文\r\n第二行\t空格  \r\nUnicode：😀 café\r\n尾部空格  ";
@@ -656,6 +703,14 @@ namespace ContentMover {
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
             try {
                 if (args.Length > 0 && args[0] == "--fixture") { Fixture(); return; }
+                if (args.Length > 1 && args[0] == "--selection-probe") {
+                    using(var deadline=new System.Threading.Timer(delegate{Environment.Exit(3);},null,2600,Timeout.Infinite)) {
+                        Point? point=args.Length>3 ? new Point(Int32.Parse(args[2]),Int32.Parse(args[3])) : (Point?)null;
+                        using(var output=new StreamWriter(Console.OpenStandardOutput(),new UTF8Encoding(false))) {
+                            output.Write(new JavaScriptSerializer().Serialize(SelectionReader.Probe(new IntPtr(Int64.Parse(args[1])),point)));
+                        }return;
+                    }
+                }
                 if (args.Length > 0 && args[0] == "--self-test") { SelfTest(); return; }
                 if (args.Length > 0 && args[0] == "--render-test") { RenderTest(); return; }
                 if (args.Length > 0 && args[0] == "--integration-test") { IntegrationTest(); return; }
@@ -714,9 +769,25 @@ namespace ContentMover {
             Assert(File.ReadAllText(path) == first + Storage.Format(clip, "", ""), "追加不覆盖");
             Assert(File.ReadAllText(path).Contains(FixtureText), "中文、空格、换行、制表符、表情原样保留");
             Assert(!first.Contains("文本来源："), "TXT 不再显示文本来源元信息");
+            using(var fixture=new Form())using(var edit=new TextBox{Multiline=true,Text=FixtureText,Dock=DockStyle.Fill}) {
+                fixture.Controls.Add(edit);fixture.Show();edit.Focus();edit.SelectAll();Application.DoEvents();
+                Assert(Native.SelectedEditText(edit.Handle)==FixtureText,"原生编辑器选区保留Unicode和换行");
+                var probe=SelectionReader.Start(edit.Handle,null);var clock=Stopwatch.StartNew();
+                while(!probe.IsCompleted && clock.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(10);}
+                Assert(probe.IsCompleted && probe.Result.Text==FixtureText,"独立读取进程取得真实编辑器选区");
+                edit.Select(0,0);Application.DoEvents();Assert(Native.SelectedEditText(edit.Handle)=="","空选区不会读取整篇文档");
+                fixture.Close();
+            }
             using(var entry=new Controller(new Settings(),true)) {
                 entry.TestEntry("");Assert(!entry.ButtonVisible,"无选区时不显示右键入口");
                 entry.TestEntry("选中文字");Assert(entry.ButtonVisible,"非空选区时显示右键入口");
+                var delayed=new TaskCompletionSource<SelectionResult>();entry.TestDelayedEntry(delayed.Task);
+                var wait=Stopwatch.StartNew();while(wait.ElapsedMilliseconds<1150){Application.DoEvents();Thread.Sleep(10);}
+                delayed.SetResult(new SelectionResult{Text="缓慢应用的选区",HasSelection=true});Application.DoEvents();
+                Assert(entry.ButtonVisible,"超过旧版900ms截止时间的选区仍显示入口");
+                var obsolete=new TaskCompletionSource<SelectionResult>();entry.TestDelayedEntry(obsolete.Task);entry.TestInvalidateEntry();
+                obsolete.SetResult(new SelectionResult{Text="过期选区",HasSelection=true});Application.DoEvents();
+                Assert(!entry.ButtonVisible,"已取消的选区任务不能重新显示入口");
                 entry.Stop();
             }
             Assert(ChatTitleReader.CandidateScore("ChatGPT",true,"page",true,true)==0, "不把应用名当成聊天标题");
@@ -731,16 +802,6 @@ namespace ContentMover {
                 editor.TitleBox.Text="内容迁移软件优化";Assert(editor.SaveButton.Enabled,"填写具体聊天标题后允许保存");
                 editor.Show();Application.DoEvents();editor.SaveButton.PerformClick();
                 Assert(File.ReadAllText(titleTestPath).Contains("标题：内容迁移软件优化"),"记录手填聊天标题");
-            }
-            var done = new ManualResetEvent(false); Clip received = null;
-            using (var bridge = new LocalBridge("test-secret", delegate(Clip entry) { received = entry; done.Set(); }, 19340)) {
-                bridge.Start();
-                string json = new JavaScriptSerializer().Serialize(new { text = FixtureText, title = "测试页面", url = "https://example.test/source", fidelity = "网页选区原文" });
-                Assert(RequestBridge(json, "wrong", "chrome-extension://test") == 403, "拒绝错误令牌");
-                Assert(RequestBridge(json, "test-secret", "https://evil.test") == 403, "拒绝网页跨域调用");
-                Assert(RequestBridge("{\"text\":\"\"}", "test-secret", "chrome-extension://test") == 400, "拒绝空文本");
-                Assert(RequestBridge(json, "test-secret", "chrome-extension://test") == 202, "浏览器桥接接收");
-                Assert(done.WaitOne(2000) && received.Text == FixtureText && received.Source == "https://example.test/source", "桥接文本和出处完整");
             }
             string startupFile = Path.Combine(folder, "startup-test.vbs");
             StartupManager.Set(startupFile, "D:\\带空格的 目录\\内容迁移.exe", true);
@@ -760,15 +821,7 @@ namespace ContentMover {
                 editor.Show(); Application.DoEvents(); editor.SaveButton.PerformClick();
                 Assert(File.Exists(fallbackFile) && File.ReadAllText(fallbackFile).Contains(FixtureText), "兼容模式保存完整原文");
             }
-            File.WriteAllText(Path.Combine(folder, "self-test.txt"), "PASS: UTF-8 fidelity; append; multiline notes; bridge auth/origin; clipboard fallback; confirmation blocks writes; confirmed save; startup enable/disable.\r\n", Encoding.UTF8);
-        }
-        static int RequestBridge(string json, string secret, string origin) {
-            using (var client = new TcpClient("127.0.0.1", 19340)) {
-                byte[] body = Encoding.UTF8.GetBytes(json); var stream = client.GetStream();
-                byte[] header = Encoding.ASCII.GetBytes("POST /capture HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: " + origin + "\r\nAuthorization: Bearer " + secret + "\r\nContent-Length: " + body.Length + "\r\n\r\n");
-                stream.Write(header, 0, header.Length); stream.Write(body, 0, body.Length);
-                string line = new StreamReader(stream).ReadLine(); return Int32.Parse(line.Split(' ')[1]);
-            }
+            File.WriteAllText(Path.Combine(folder, "self-test.txt"), "PASS: UTF-8 fidelity; append; multiline notes; clipboard fallback; confirmation blocks writes; confirmed save; startup enable/disable.\r\n", Encoding.UTF8);
         }
         static void Fixture() {
             var form = new Form { Text = "内容迁移测试选区", Size = new Size(620, 330), StartPosition = FormStartPosition.CenterScreen, TopMost = true };
