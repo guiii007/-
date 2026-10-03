@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.1.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -129,8 +129,18 @@ namespace ContentMover {
     }
     public sealed class SelectionResult { public string Text=""; public bool HasSelection; }
     public sealed class Settings {
-        public string OutputPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "内容迁移.txt");
+        public string OutputPath = OutputFiles.DatedPath(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),DateTime.Today);
+        public bool CustomOutput;
         public bool RightClickEnabled = true;
+    }
+    static class OutputFiles {
+        public static string DatedPath(string desktop,DateTime date){return Path.Combine(desktop,"内容迁移"+date.ToString("yyyy-M-d",System.Globalization.CultureInfo.InvariantCulture)+".txt");}
+        public static string Resolve(string path,bool custom,string desktop,DateTime date) {
+            if(custom || File.Exists(path))return path;
+            bool onDesktop=String.Equals(Path.GetDirectoryName(Path.GetFullPath(path)),Path.GetFullPath(desktop).TrimEnd(Path.DirectorySeparatorChar),StringComparison.OrdinalIgnoreCase);
+            bool defaultName=System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(path),@"^内容迁移(\d{4}-\d{1,2}-\d{1,2})?\.txt$",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            return onDesktop && defaultName ? DatedPath(desktop,date) : path;
+        }
     }
     public sealed class Clip {
         public string Text = "", Title = "", App = "", Source = "", Detail = "", Fidelity = "应用复制提供的纯文本";
@@ -646,18 +656,21 @@ namespace ContentMover {
             if (String.IsNullOrEmpty(clip.Text)) { Error("没有选中文字，未保存任何内容。"); return; }
             if (TestMode) { if (TestCaptured != null) TestCaptured(clip); return; }
             busy = true;
-            try { using (var editor = new NoteDialog(clip, settings.OutputPath)) {
+            try { EnsureOutput(); using (var editor = new NoteDialog(clip, settings.OutputPath)) {
                 if (editor.ShowDialog() == DialogResult.OK) Notify("已保存到内容迁移 TXT", "原文、来源和备注已追加。点击此通知可打开文件。");
             } } finally { busy = false; }
         }
         void EnsureOutput() {
+            string resolved=OutputFiles.Resolve(settings.OutputPath,settings.CustomOutput,Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),DateTime.Today);
+            bool changed=resolved!=settings.OutputPath;settings.OutputPath=resolved;
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(settings.OutputPath)));
             using (var file = new FileStream(settings.OutputPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read)) { }
+            if(changed)SaveSettings();
         }
         void ChangeOutput() {
             using (var dialog = new SaveFileDialog { Title = "选择内容迁移保存文件（追加，不覆盖）", Filter = "文本文件 (*.txt)|*.txt", FileName = settings.OutputPath, OverwritePrompt = false }) {
-                if (dialog.ShowDialog() == DialogResult.OK) { string old = settings.OutputPath; settings.OutputPath = dialog.FileName;
-                    try { EnsureOutput(); SaveSettings(); Notify("保存位置已更改", settings.OutputPath); } catch (Exception ex) { settings.OutputPath = old; Error(ex.Message); }
+                if (dialog.ShowDialog() == DialogResult.OK) { string old = settings.OutputPath;bool oldCustom=settings.CustomOutput; settings.OutputPath = dialog.FileName;settings.CustomOutput=true;
+                    try { EnsureOutput(); SaveSettings(); Notify("保存位置已更改", settings.OutputPath); } catch (Exception ex) { settings.OutputPath = old;settings.CustomOutput=oldCustom; Error(ex.Message); }
                 }
             }
         }
@@ -690,7 +703,7 @@ namespace ContentMover {
             if (File.Exists(ConfigPath)) {
                 Settings config = new JavaScriptSerializer().Deserialize<Settings>(File.ReadAllText(ConfigPath));
                 if (config == null || String.IsNullOrWhiteSpace(config.OutputPath) || !Path.IsPathRooted(config.OutputPath))
-                    throw new InvalidDataException("config.json 中的保存路径或浏览器配对信息无效。");
+                    throw new InvalidDataException("config.json 中的保存路径无效。");
                 return config;
             }
             return new Settings();
@@ -761,6 +774,13 @@ namespace ContentMover {
         static void Assert(bool condition, string message) { if (!condition) throw new Exception("TEST FAILED: " + message); }
         static void SelfTest() {
             string folder = TestFolder(), path = Path.Combine(folder, "storage-" + Guid.NewGuid().ToString("N") + ".txt");
+            string outputTest=Path.Combine(folder,"dated-output-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(outputTest);
+            string legacy=Path.Combine(outputTest,"内容迁移.txt"),today=OutputFiles.DatedPath(outputTest,new DateTime(2026,10,4));
+            Assert(Path.GetFileName(today)=="内容迁移2026-10-4.txt","日期文件名有效且不含斜杠");
+            Assert(OutputFiles.Resolve(legacy,false,outputTest,new DateTime(2026,10,4))==today,"缺失默认文件时使用当天日期");
+            File.WriteAllText(legacy,"保留旧摘录");Assert(OutputFiles.Resolve(legacy,false,outputTest,new DateTime(2026,10,4))==legacy,"已有摘录文件保持原路径");
+            Assert(OutputFiles.Resolve(today,true,outputTest,new DateTime(2026,10,5))==today,"自定义保存文件不改名");
+            Assert(OutputFiles.Resolve(today,false,outputTest,new DateTime(2026,10,5))==OutputFiles.DatedPath(outputTest,new DateTime(2026,10,5)),"缺失带日期默认文件时采用新的创建日期");
             var clip = new Clip { Text = FixtureText, App = "测试", Title = "选区测试", Source = "D:\\文档\\原文.docx" };
             string first = Storage.Format(clip, "留下的原因\n第二行备注", clip.Source);
             Storage.Append(path, clip, "留下的原因\n第二行备注", clip.Source);
