@@ -4,7 +4,7 @@
 
 ## 下载与安装
 
-**[下载 Windows 安装程序](https://github.com/guiii007/-/releases/latest/download/ContentMoverSetup.exe)**
+**[下载 Windows 安装程序](https://github.com/guiii007/content-mover/releases/latest/download/ContentMoverSetup.exe)**
 
 下载后双击安装程序，按“下一步 → 安装 → 完成”即可。默认创建桌面快捷方式，可选择开机自动启动。适用于 Windows 10/11 x64，使用系统自带的 .NET Framework 4.x。
 
