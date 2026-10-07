@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.2.7.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.8.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -508,7 +508,7 @@ namespace ContentMover {
         public void AddImage(Image image){images.Add(new Attachment{Image=new Bitmap(image)});selected=images.Count-1;AutoScrollMinSize=new Size(images.Count*128+8,0);Invalidate();}
         public void PasteClipboard(){try{if(!Clipboard.ContainsImage())return;using(var image=Clipboard.GetImage()){if(image!=null)AddImage(image);}}catch(Exception error){MessageBox.Show(this,"暂时无法读取剪贴板图片，请重新复制后再粘贴。\n"+error.Message,"内容迁移");}}
         public void RemoveSelected(){if(selected<0 || selected>=images.Count)return;images[selected].Dispose();images.RemoveAt(selected);selected=Math.Min(selected,images.Count-1);AutoScrollMinSize=new Size(images.Count*128+8,0);Invalidate();}
-        public string SaveImages(string output){var markdown=new StringBuilder();foreach(var image in images){string destination=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output)),image.Relative.Replace('/',Path.DirectorySeparatorChar));Directory.CreateDirectory(Path.GetDirectoryName(destination));if(!File.Exists(destination))image.Image.Save(destination,System.Drawing.Imaging.ImageFormat.Png);markdown.Append("\r\n![截图](").Append(image.Relative).Append(")\r\n");}return markdown.ToString();}
+        public string SaveImages(string output){var markdown=new StringBuilder();foreach(var image in images){string destination=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output)),image.Relative.Replace('/',Path.DirectorySeparatorChar));Directory.CreateDirectory(Path.GetDirectoryName(destination));if(!File.Exists(destination))image.Image.Save(destination,System.Drawing.Imaging.ImageFormat.Png);markdown.Append("\r\n\r\n![截图](").Append(image.Relative).Append(")\r\n");}return markdown.ToString();}
         protected override bool ProcessCmdKey(ref Message message,Keys key){if(key==(Keys.Control|Keys.V)){PasteClipboard();return true;}if(key==Keys.Delete || key==Keys.Back){RemoveSelected();return true;}return base.ProcessCmdKey(ref message,key);}
         protected override void OnMouseDown(MouseEventArgs e){base.OnMouseDown(e);Focus();int index=(e.X-AutoScrollPosition.X-4)/128;if(index>=0 && index<images.Count)selected=index;Invalidate();}
         protected override void OnGotFocus(EventArgs e){base.OnGotFocus(e);Invalidate();}
