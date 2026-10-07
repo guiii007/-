@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.2.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.3.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -319,6 +319,9 @@ namespace ContentMover {
         [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
+        [DllImport("shcore.dll")] static extern int SetProcessDpiAwareness(int awareness);
+        public static void InitializeDpi(){try{if(SetProcessDpiAwarenessContext(new IntPtr(-4)))return;}catch{}try{if(SetProcessDpiAwareness(2)==0)return;}catch{}SetProcessDPIAware();}
         [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
         [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] public static extern IntPtr GetThreadDesktop(uint thread);
@@ -416,6 +419,9 @@ namespace ContentMover {
             AutoScaleMode = AutoScaleMode.None; BackColor = Color.FromArgb(34, 95, 175);
             Font=new Font("Microsoft YaHei UI",10); ForeColor=Color.White; Cursor=Cursors.Hand; Text="内容迁移";
             DoubleBuffered=true;
+            MeasureCaption();
+        }
+        void MeasureCaption(){
             using(var graphics=CreateGraphics()) using(var caption=CaptionPath(graphics)) {
                 var bounds=caption.GetBounds(); float scale=graphics.DpiY/96f;
                 // Measure visible glyphs, not a fixed button width or invisible font side bearings.
@@ -459,6 +465,9 @@ namespace ContentMover {
             return new Point(Math.Max(area.Left,Math.Min(x,area.Right-size.Width)),Math.Max(area.Top,Math.Min(y,area.Bottom-size.Height)));
         }
         public void ShowAt(Point point,Rectangle? menu=null) {
+            // Move the hidden window to the target monitor before measuring its DPI-dependent caption.
+            Native.SetWindowPos(Handle,IntPtr.Zero,point.X,point.Y,0,0,0x1|0x4|0x10);
+            MeasureCaption();
             Rectangle area = Screen.FromPoint(point).WorkingArea;
             int gap;using(var graphics=CreateGraphics())gap=Math.Max(6,(int)Math.Round(8*graphics.DpiX/96f));
             Location=Placement(point,Size,area,menu,gap);
@@ -584,6 +593,7 @@ namespace ContentMover {
         int selectionGeneration;
         bool busy, shuttingDown;
         public bool TestMode;
+        public bool AllowTestMouse;
         public Action<Clip> TestCaptured;
         public Action<string> TestError;
         static readonly string ConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
@@ -611,7 +621,7 @@ namespace ContentMover {
             floating.Chosen += delegate { CaptureSelection(sourceWindow, true); };
             expiry.Interval = 14000; expiry.Tick += delegate { expiry.Stop(); floating.Hide();RecordEntryStatus("entry-expired",false); };
             mouseMonitor=new MouseMonitor(delegate(int message,Native.MOUSE data,IntPtr window){
-                if(!shuttingDown)try{BeginInvoke(new Action(delegate{OnMouse(message,data,window);}));}catch{}
+                if(!shuttingDown && (!TestMode || AllowTestMouse))try{BeginInvoke(new Action(delegate{OnMouse(message,data,window);}));}catch{}
             });
             if (!Native.RegisterHotKey(Handle, 1, 0x4003, 0x4D) && !testMode) Notify("快捷键被占用", "右键入口仍可用；Ctrl+Alt+M 已被其他程序占用。");
             if (!testMode) {
@@ -873,7 +883,7 @@ namespace ContentMover {
     static class Program {
         public const string FixtureText = "  中文原文\r\n第二行\t空格  \r\nUnicode：😀 café\r\n尾部空格  ";
         [STAThread] static void Main(string[] args) {
-            Native.SetProcessDPIAware();
+            Native.InitializeDpi();
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
             try {
                 if (args.Length > 0 && args[0] == "--fixture") { Fixture(); return; }
@@ -1048,6 +1058,16 @@ namespace ContentMover {
                 var found=Native.ContextMenuBounds(owner.Handle,anchor);Assert(found.HasValue && found.Value.IntersectsWith(popup.Bounds),"识别实际弹出菜单位置");
                 popup.Close();owner.Close();
             }
+            foreach(var monitor in Screen.AllScreens)using(var owner=new Form{Size=new Size(300,180),StartPosition=FormStartPosition.Manual,Location=new Point(monitor.WorkingArea.Left+100,monitor.WorkingArea.Top+100)})using(var popup=new ContextMenuStrip()){
+                popup.Items.Add("Copy");popup.Items.Add("Select All");owner.Show();Application.DoEvents();
+                Native.RECT rectangle;Native.GetWindowRect(owner.Handle,out rectangle);
+                Assert(rectangle.Left==owner.Left && rectangle.Top==owner.Top,"各屏幕 WinForms 和 Win32 使用同一套物理坐标");
+                var anchor=owner.PointToScreen(new Point(80,60));popup.Show(anchor);Application.DoEvents();
+                var detected=Native.ContextMenuBounds(owner.Handle,anchor);
+                // Small test menus can be shorter than the native discovery threshold; compare coordinates directly.
+                Native.GetWindowRect(popup.Handle,out rectangle);Assert(rectangle.Left==popup.Left && rectangle.Top==popup.Top,"不同缩放屏幕上的菜单坐标一致");
+                popup.Close();owner.Close();
+            }
             using(var monitor=new MouseMonitor(delegate{},80)) {
                 var wait=Stopwatch.StartNew();while(monitor.Renewals<2 && wait.ElapsedMilliseconds<1500){Application.DoEvents();Thread.Sleep(10);}
                 Assert(monitor.Renewals>=2,"鼠标监听定期重新注册成功");
@@ -1121,6 +1141,7 @@ namespace ContentMover {
             File.WriteAllText(Path.Combine(folder, "desktop-debug.txt"), "Thread desktop=" + Native.DesktopName(Native.GetThreadDesktop(Native.GetCurrentThreadId())) + " input desktop=" + Native.DesktopName(inputDesktop));
             if (inputDesktop != IntPtr.Zero) Native.CloseDesktop(inputDesktop);
             using (var controller = new Controller(new Settings(), true)) {
+                controller.AllowTestMouse=true;
                 Process fixture = null; var timeout = new System.Windows.Forms.Timer { Interval = 12000 };
                 var start = new System.Windows.Forms.Timer { Interval = 500 };
                 bool completed = false;
