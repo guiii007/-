@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.2.5.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.6.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -485,7 +485,31 @@ namespace ContentMover {
             Native.ShowWindow(Handle,4);
         }
     }
+    sealed class ImagePasteBox : ScrollableControl {
+        sealed class Attachment : IDisposable {
+            public Bitmap Image;public string Relative="assets/"+Guid.NewGuid().ToString("N")+".png";
+            public void Dispose(){Image.Dispose();}
+        }
+        readonly List<Attachment> images=new List<Attachment>();
+        int selected=-1;
+        public int ImageCount {get{return images.Count;}}
+        public ImagePasteBox(){TabStop=true;AutoScroll=true;BackColor=Color.FromArgb(246,248,251);AccessibleName="图片粘贴框";SetStyle(ControlStyles.Selectable|ControlStyles.OptimizedDoubleBuffer|ControlStyles.AllPaintingInWmPaint|ControlStyles.UserPaint,true);}
+        public void AddImage(Image image){images.Add(new Attachment{Image=new Bitmap(image)});selected=images.Count-1;AutoScrollMinSize=new Size(images.Count*128+8,0);Invalidate();}
+        public void PasteClipboard(){try{if(!Clipboard.ContainsImage())return;using(var image=Clipboard.GetImage()){if(image!=null)AddImage(image);}}catch(Exception error){MessageBox.Show(this,"暂时无法读取剪贴板图片，请重新复制后再粘贴。\n"+error.Message,"内容迁移");}}
+        public void RemoveSelected(){if(selected<0 || selected>=images.Count)return;images[selected].Dispose();images.RemoveAt(selected);selected=Math.Min(selected,images.Count-1);AutoScrollMinSize=new Size(images.Count*128+8,0);Invalidate();}
+        public string SaveImages(string output){var markdown=new StringBuilder();foreach(var image in images){string destination=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output)),image.Relative.Replace('/',Path.DirectorySeparatorChar));Directory.CreateDirectory(Path.GetDirectoryName(destination));if(!File.Exists(destination))image.Image.Save(destination,System.Drawing.Imaging.ImageFormat.Png);markdown.Append("\r\n![截图](").Append(image.Relative).Append(")\r\n");}return markdown.ToString();}
+        protected override bool ProcessCmdKey(ref Message message,Keys key){if(key==(Keys.Control|Keys.V)){PasteClipboard();return true;}if(key==Keys.Delete || key==Keys.Back){RemoveSelected();return true;}return base.ProcessCmdKey(ref message,key);}
+        protected override void OnMouseDown(MouseEventArgs e){base.OnMouseDown(e);Focus();int index=(e.X-AutoScrollPosition.X-4)/128;if(index>=0 && index<images.Count)selected=index;Invalidate();}
+        protected override void OnGotFocus(EventArgs e){base.OnGotFocus(e);Invalidate();}
+        protected override void OnLostFocus(EventArgs e){base.OnLostFocus(e);Invalidate();}
+        protected override void OnPaint(PaintEventArgs e){base.OnPaint(e);var bounds=ClientRectangle;bounds.Width--;bounds.Height--;using(var pen=new Pen(Focused ? Color.FromArgb(43,105,190) : Color.LightGray))e.Graphics.DrawRectangle(pen,bounds);
+            if(images.Count==0){TextRenderer.DrawText(e.Graphics,"点击这里，按 Ctrl+V 粘贴截图",Font,ClientRectangle,Color.DimGray,TextFormatFlags.HorizontalCenter|TextFormatFlags.VerticalCenter);return;}
+            for(int i=0;i<images.Count;i++){var tile=new Rectangle(4+i*128+AutoScrollPosition.X,4,120,Math.Max(35,ClientSize.Height-26));if(tile.Right<0 || tile.Left>ClientSize.Width)continue;var image=images[i].Image;float scale=Math.Min((tile.Width-8f)/image.Width,(tile.Height-8f)/image.Height);var destination=new RectangleF(tile.X+(tile.Width-image.Width*scale)/2,tile.Y+(tile.Height-image.Height*scale)/2,image.Width*scale,image.Height*scale);e.Graphics.DrawImage(image,destination);using(var pen=new Pen(i==selected ? Color.FromArgb(43,105,190) : Color.LightGray))e.Graphics.DrawRectangle(pen,tile);}
+        }
+        protected override void Dispose(bool disposing){if(disposing){foreach(var image in images)image.Dispose();images.Clear();}base.Dispose(disposing);}
+    }
     sealed class NoteDialog : Form {
+        public readonly ImagePasteBox ImagesBox=new ImagePasteBox();
         public readonly TextBox NoteBox = new TextBox(), SourceBox = new TextBox();
         public readonly TextBox TitleBox = new TextBox();
         public CheckBox ConfirmationBox;
@@ -498,7 +522,7 @@ namespace ContentMover {
             needsTitle=clip.RequiresTitle;
             Icon = AppIcon.Load();
             Text = "内容迁移 · 添加备注"; Font = new Font("Microsoft YaHei UI", 9); AutoScaleMode = AutoScaleMode.Dpi;
-            Size = new Size(650, 645); MinimumSize = new Size(560, 570); StartPosition = FormStartPosition.CenterScreen;
+            Size = new Size(650, 745); MinimumSize = new Size(560, 640); StartPosition = FormStartPosition.CenterScreen;
             TopMost = true; MaximizeBox = false; MinimizeBox = false; BackColor = Color.White;
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 1, RowCount = 12 };
             float[] heights = { 29, 25, 33, 24, 120, 29, 100, 67, 44, 24, 25, 33 };
@@ -518,14 +542,9 @@ namespace ContentMover {
                 ScrollBars = ScrollBars.Both, Dock = DockStyle.Fill, BackColor = Color.FromArgb(246, 248, 251) };
             PreviewBox=preview;
             layout.Controls.Add(preview,0,4);
-            var attachments=new Dictionary<string,string>();
             var noteHeading=new Panel{Dock=DockStyle.Fill};
-            var addImage=new Button{Text="插入图片…",Dock=DockStyle.Right,Width=100};
             noteHeading.Controls.Add(new Label{Text="备注（支持 Markdown；Ctrl + Enter 保存）",Dock=DockStyle.Fill,Padding=new Padding(0,7,0,0)});
-            noteHeading.Controls.Add(addImage);layout.Controls.Add(noteHeading,0,5);
-            addImage.Click+=delegate{using(var picker=new OpenFileDialog{Filter="图片|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp"}){if(picker.ShowDialog(this)!=DialogResult.OK)return;
-                string relative="assets/"+Guid.NewGuid().ToString("N")+Path.GetExtension(picker.FileName).ToLowerInvariant();attachments.Add(relative,picker.FileName);
-                NoteBox.SelectedText="\r\n![图片]("+relative+")\r\n";NoteBox.Focus();}};
+            layout.Controls.Add(noteHeading,0,5);
             NoteBox.Multiline = true; NoteBox.AcceptsReturn = true; NoteBox.ScrollBars = ScrollBars.Vertical; NoteBox.Dock = DockStyle.Fill;
             layout.Controls.Add(NoteBox, 0, 6);
             var sourcePanel = new Panel { Dock = DockStyle.Fill };
@@ -544,8 +563,8 @@ namespace ContentMover {
             TitleBox.TextChanged += delegate { updateSave(); }; updateSave();
             save.Click += delegate {
                 try { clip.Title = TitleBox.Text.Trim();if(!preview.ReadOnly)clip.Text=preview.Text;
-                    foreach(var attachment in attachments){string destination=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output)),attachment.Key.Replace('/',Path.DirectorySeparatorChar));Directory.CreateDirectory(Path.GetDirectoryName(destination));if(!File.Exists(destination))File.Copy(attachment.Value,destination);}
-                    Storage.Append(output, clip, NoteBox.Text, SourceBox.Text); DialogResult = DialogResult.OK; Close(); }
+                    string imageMarkdown=ImagesBox.SaveImages(output);
+                    Storage.Append(output, clip, NoteBox.Text+imageMarkdown, SourceBox.Text); DialogResult = DialogResult.OK; Close(); }
                 catch (Exception error) { MessageBox.Show(this, "保存失败，原文和备注仍保留在这里。\n" + error.Message, "内容迁移", MessageBoxButtons.OK, MessageBoxIcon.Error); }
             };
             var cancel = new Button { Text = "取消", AutoSize = true, Height = 32, DialogResult = DialogResult.Cancel };
@@ -553,11 +572,14 @@ namespace ContentMover {
             layout.Controls.Add(new Label { Text = "追加到：" + output, Dock = DockStyle.Fill, AutoEllipsis = true, ForeColor = Color.DimGray }, 0, 9);
             // Move existing rows down; preserve their height definitions and flexible preview rows.
             var originalControls = new List<Control>(); foreach (Control control in layout.Controls) originalControls.Add(control);
-            foreach (Control control in originalControls) { int row = layout.GetRow(control); if (row >= 1) layout.SetRow(control, row + 2); }
+            layout.RowCount=14;
+            foreach (Control control in originalControls) { int row = layout.GetRow(control); if (row >= 1) layout.SetRow(control, row + (row>=7 ? 4 : 2)); }
             layout.RowStyles.Clear();
-            float[] finalHeights = { 29, 25, 33, 25, 33, 24, 120, 29, 100, 67, 44, 24 };
+            float[] finalHeights = { 29, 25, 33, 25, 33, 24, 120, 29, 100, 25, 100, 67, 44, 24 };
             for (int i=0;i<finalHeights.Length;i++) layout.RowStyles.Add(new RowStyle(i==6 || i==8 ? SizeType.Percent : SizeType.Absolute, i==6 ? 60 : i==8 ? 40 : finalHeights[i]));
             layout.Controls.Add(titleLabel,0,1); layout.Controls.Add(TitleBox,0,2);
+            layout.Controls.Add(new Label{Text="图片（Ctrl+V 粘贴；可多张；选中后按 Delete 删除）",Dock=DockStyle.Fill},0,9);
+            ImagesBox.Dock=DockStyle.Fill;layout.Controls.Add(ImagesBox,0,10);
             Controls.Add(layout); CancelButton = cancel; KeyPreview = true;
             KeyDown += delegate(object sender, KeyEventArgs e) { if (e.Control && e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; save.PerformClick(); } };
             Shown += delegate { FocusInitialInput();if(!inputReady)focusRetry.Start(); };
@@ -905,6 +927,7 @@ namespace ContentMover {
                 if (args.Length > 0 && args[0] == "--self-test") { SelfTest(); return; }
                 if (args.Length > 0 && args[0] == "--focus-test") { FocusTest(); return; }
                 if (args.Length > 0 && args[0] == "--copy-test") { CopyTest(); return; }
+                if (args.Length > 0 && args[0] == "--image-test") { ImageTest(); return; }
                 if (args.Length > 0 && args[0] == "--render-test") { RenderTest(); return; }
                 if (args.Length > 0 && args[0] == "--integration-test") { IntegrationTest(); return; }
                 bool created;
@@ -992,6 +1015,29 @@ namespace ContentMover {
                     if(original!=null)Clipboard.SetDataObject(original,true);
                 }
             }
+        }
+        static void ImageTest() {
+            var previous=Clipboard.GetDataObject();string folder=Path.Combine(TestFolder(),"images-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
+            try {
+                string output=Path.Combine(folder,"摘录.md");
+                using(var editor=new NoteDialog(new Clip{Text=FixtureText,Title="截图粘贴验证"},output)) {
+                    editor.Show();Application.DoEvents();
+                    using(var first=new Bitmap(640,320)){using(var graphics=Graphics.FromImage(first))graphics.Clear(Color.CornflowerBlue);Clipboard.SetImage(first);editor.ImagesBox.PasteClipboard();}
+                    using(var second=new Bitmap(320,640)){using(var graphics=Graphics.FromImage(second))graphics.Clear(Color.OrangeRed);Clipboard.SetImage(second);editor.ImagesBox.PasteClipboard();}
+                    editor.ImagesBox.PasteClipboard();Assert(editor.ImagesBox.ImageCount==3,"连续粘贴图片");editor.ImagesBox.RemoveSelected();Assert(editor.ImagesBox.ImageCount==2,"删除误贴图片");
+                    Clipboard.SetText("普通文字");editor.ImagesBox.PasteClipboard();Assert(editor.ImagesBox.ImageCount==2,"非图片剪贴板不改动图片");
+                    editor.NoteBox.Text="**两张截图**";
+                    using(var bitmap=new Bitmap(editor.Width,editor.Height)){editor.DrawToBitmap(bitmap,new Rectangle(Point.Empty,editor.Size));bitmap.Save(Path.Combine(TestFolder(),"image-paste-dialog.png"));}
+                    editor.SaveButton.PerformClick();Assert(editor.DialogResult==DialogResult.OK,"保存图片摘录");
+                }
+                string markdown=File.ReadAllText(output);string[] images=Directory.GetFiles(Path.Combine(folder,"assets"),"*.png");Assert(images.Length==2 && markdown.Contains(FixtureText) && markdown.Contains("**两张截图**"),"多图片与原文备注一起保存");
+                int position=-1;foreach(var name in images){Assert(markdown.Contains("assets/"+Path.GetFileName(name)),"所有图片使用相对链接");}
+                string[] markers=markdown.Split(new[]{"![截图](assets/"},StringSplitOptions.None);Assert(markers.Length==3,"两个图片引用");
+                foreach(var expected in new[]{Color.CornflowerBlue,Color.OrangeRed}){position++;string name=markers[position+1].Split(')')[0];using(var bitmap=new Bitmap(Path.Combine(folder,"assets",name))){Assert(bitmap.GetPixel(0,0).ToArgb()==expected.ToArgb(),"图片颜色和顺序保持");Assert(bitmap.Width==(position==0 ? 640 : 320) && bitmap.Height==(position==0 ? 320 : 640),"图片原始尺寸保持");}}
+                string cancelled=Path.Combine(folder,"cancelled.md");using(var editor=new NoteDialog(new Clip{Text=FixtureText,Title="取消验证"},cancelled)){using(var bitmap=new Bitmap(10,10))editor.ImagesBox.AddImage(bitmap);editor.Close();}
+                Assert(!File.Exists(cancelled) && Directory.GetFiles(Path.Combine(folder,"assets")).Length==2,"取消不写入图片");
+                File.WriteAllText(Path.Combine(TestFolder(),"image-test.txt"),"PASS: clipboard multi-image paste; deletion; non-image ignored; PNG dimensions and pixels; Markdown relative links and order; cancellation; rendered dialog.");
+            }finally{if(previous!=null)Clipboard.SetDataObject(previous,true);else Clipboard.Clear();}
         }
         static void FocusTest() {
             Process fixture=null;
