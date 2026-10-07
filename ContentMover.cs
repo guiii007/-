@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.1.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.3.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -172,6 +172,14 @@ namespace ContentMover {
         }
     }
     static class CapturePolicy {
+        public static bool UseFreshCopy(Clip clip,string text) {
+            if(String.IsNullOrEmpty(text))return false;
+            clip.Text=text;clip.RequiresConfirmation=false;clip.Fidelity="应用复制提供的纯文本";return true;
+        }
+        public static bool UseAccessibilityFallback(Clip clip,string text) {
+            if(String.IsNullOrEmpty(text))return false;
+            clip.Text=text;clip.RequiresConfirmation=true;clip.Fidelity="未取得本次复制文本；辅助功能读取可能与原文不同，请逐字核对。";return true;
+        }
         public static bool UseClipboardFallback(Clip clip, string text) {
             if (String.IsNullOrEmpty(text)) return false;
             clip.Text = text; clip.RequiresConfirmation = true;
@@ -239,6 +247,16 @@ namespace ContentMover {
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hwnd);
+        public static bool ActivateSource(IntPtr window) {
+            uint unused;uint own=GetCurrentThreadId(),foreground=GetWindowThreadProcessId(GetForegroundWindow(),out unused),target=GetWindowThreadProcessId(window,out unused);
+            bool joinedForeground=false,joinedTarget=false;
+            try {
+                if(foreground!=0 && foreground!=own)joinedForeground=AttachThreadInput(own,foreground,true);
+                if(target!=0 && target!=own && target!=foreground)joinedTarget=AttachThreadInput(own,target,true);
+                ShowWindow(window,5);BringWindowToTop(window);SetForegroundWindow(window);return GetForegroundWindow()==window;
+            }finally{if(joinedTarget)AttachThreadInput(own,target,false);if(joinedForeground)AttachThreadInput(own,foreground,false);}
+        }
         [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
@@ -378,10 +396,12 @@ namespace ContentMover {
         public readonly TextBox TitleBox = new TextBox();
         public CheckBox ConfirmationBox;
         public Button SaveButton;
+        public TextBox PreviewBox;
+        public Action<string> ApplyOcrResult;
         readonly System.Windows.Forms.Timer focusRetry=new System.Windows.Forms.Timer{Interval=80};
         readonly bool needsTitle;
         bool inputReady;int focusAttempts;
-        public NoteDialog(Clip clip, string output) {
+        public NoteDialog(Clip clip, string output,IntPtr sourceWindow=default(IntPtr)) {
             needsTitle=clip.RequiresTitle;
             Icon = AppIcon.Load();
             Text = "内容迁移 · 添加备注"; Font = new Font("Microsoft YaHei UI", 9); AutoScaleMode = AutoScaleMode.Dpi;
@@ -398,30 +418,65 @@ namespace ContentMover {
             var titleLabel = new Label { Text = clip.RequiresTitle ? "聊天标题（未能自动读取，请填写当前聊天的名称）" : "标题（可修改，便于以后回溯）", Dock = DockStyle.Fill,
                 ForeColor = clip.RequiresTitle ? Color.FromArgb(161,78,14) : ForeColor };
             TitleBox.Text = clip.RequiresTitle ? "" : clip.Title; TitleBox.Dock = DockStyle.Fill;
-            layout.Controls.Add(new Label { Text = "原文预览 · " + clip.Text.Length + " 个字符", Dock = DockStyle.Fill }, 0, 3);
-            layout.Controls.Add(new TextBox { Text = clip.Text, ReadOnly = true, Multiline = true, WordWrap = false,
-                ScrollBars = ScrollBars.Both, Dock = DockStyle.Fill, BackColor = Color.FromArgb(246, 248, 251) }, 0, 4);
+            var previewHeading=new Panel{Dock=DockStyle.Fill};
+            var countLabel=new Label{Text="原文预览 · "+clip.Text.Length+" 个字符",Dock=DockStyle.Fill};previewHeading.Controls.Add(countLabel);
+            var recognize=new LinkLabel{Text="乱码？从原文框选识别",Dock=DockStyle.Right,Width=178,TextAlign=ContentAlignment.MiddleRight,LinkBehavior=LinkBehavior.HoverUnderline};previewHeading.Controls.Add(recognize);
+            layout.Controls.Add(previewHeading,0,3);
+            var preview=new TextBox { Text = clip.Text, ReadOnly = true, Multiline = true, WordWrap = false,
+                ScrollBars = ScrollBars.Both, Dock = DockStyle.Fill, BackColor = Color.FromArgb(246, 248, 251) };
+            PreviewBox=preview;
+            layout.Controls.Add(preview,0,4);
             layout.Controls.Add(new Label { Text = "备注（可以留空；Ctrl + Enter 保存，Esc 取消）", Dock = DockStyle.Fill, Padding = new Padding(0, 7, 0, 0) }, 0, 5);
             NoteBox.Multiline = true; NoteBox.AcceptsReturn = true; NoteBox.ScrollBars = ScrollBars.Vertical; NoteBox.Dock = DockStyle.Fill;
             layout.Controls.Add(NoteBox, 0, 6);
             var sourcePanel = new Panel { Dock = DockStyle.Fill };
-            sourcePanel.Controls.Add(new Label { Text = "来源窗口：" + clip.App + " · " + clip.Title + "\n" + clip.Fidelity,
-                Dock = DockStyle.Top, Height = 39, AutoEllipsis = true, ForeColor = clip.RequiresConfirmation ? Color.FromArgb(161, 78, 14) : Color.DimGray });
+            var sourceInfo=new Label { Text = "来源窗口：" + clip.App + " · " + clip.Title + "\n" + clip.Fidelity,
+                Dock = DockStyle.Top, Height = 39, AutoEllipsis = true, ForeColor = clip.RequiresConfirmation ? Color.FromArgb(161, 78, 14) : Color.DimGray };
+            sourcePanel.Controls.Add(sourceInfo);
             var confirm = new CheckBox { Text = "我已核对：上方原文就是本次要迁移的内容", Dock = DockStyle.Bottom, Height = 25, Visible = clip.RequiresConfirmation };
             ConfirmationBox = confirm;
             sourcePanel.Controls.Add(confirm); layout.Controls.Add(sourcePanel, 0, 7);
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
             var save = new Button { Text = "保存到 TXT", AutoSize = true, Height = 32 };
             SaveButton = save;
-            Action updateSave = delegate { save.Enabled = (!clip.RequiresConfirmation || confirm.Checked) && (!clip.RequiresTitle || ChatTitleReader.IsSpecific(TitleBox.Text)); };
+            bool recognizing=false;
+            Action updateSave = delegate { save.Enabled = !recognizing && preview.Text.Length>0 && (!clip.RequiresConfirmation || confirm.Checked) && (!clip.RequiresTitle || ChatTitleReader.IsSpecific(TitleBox.Text)); };
+            preview.TextChanged+=delegate{countLabel.Text="原文预览 · "+preview.Text.Length+" 个字符";updateSave();};
             confirm.CheckedChanged += delegate { updateSave(); };
             TitleBox.TextChanged += delegate { updateSave(); }; updateSave();
             save.Click += delegate {
-                try { clip.Title = TitleBox.Text.Trim(); Storage.Append(output, clip, NoteBox.Text, SourceBox.Text); DialogResult = DialogResult.OK; Close(); }
+                try { clip.Title = TitleBox.Text.Trim();if(!preview.ReadOnly)clip.Text=preview.Text; Storage.Append(output, clip, NoteBox.Text, SourceBox.Text); DialogResult = DialogResult.OK; Close(); }
                 catch (Exception error) { MessageBox.Show(this, "保存失败，原文和备注仍保留在这里。\n" + error.Message, "内容迁移", MessageBoxButtons.OK, MessageBoxIcon.Error); }
             };
             var cancel = new Button { Text = "取消", AutoSize = true, Height = 32, DialogResult = DialogResult.Cancel };
             buttons.Controls.Add(save); buttons.Controls.Add(cancel); layout.Controls.Add(buttons, 0, 8);
+            ApplyOcrResult=delegate(string text) {
+                clip.Text=text;clip.RequiresConfirmation=true;clip.Fidelity="页面框选识别；请核对字母、数字和上下标，可在预览框修正。";
+                preview.ReadOnly=false;preview.BackColor=Color.White;preview.Text=text;
+                confirm.Checked=false;confirm.Visible=true;sourceInfo.Text=clip.Fidelity;sourceInfo.ForeColor=Color.FromArgb(161,78,14);updateSave();
+            };
+            recognize.Click+=async delegate {
+                string temporary=null;recognizing=true;recognize.Enabled=false;cancel.Enabled=false;updateSave();
+                try {
+                    Hide();
+                    if(sourceWindow!=IntPtr.Zero) {
+                        uint unused;uint other=Native.GetWindowThreadProcessId(Native.GetForegroundWindow(),out unused),own=Native.GetCurrentThreadId();
+                        bool attached=other!=0 && other!=own && Native.AttachThreadInput(own,other,true);
+                        try{Native.SetForegroundWindow(sourceWindow);}finally{if(attached)Native.AttachThreadInput(own,other,false);}
+                    }
+                    Rectangle region;using(var selector=new RegionSelector()){if(selector.ShowDialog()!=DialogResult.OK)return;region=selector.SelectedRegion;}
+                    await Task.Delay(200);
+                    temporary=Path.Combine(Path.GetTempPath(),"ContentMover-OCR-"+Guid.NewGuid().ToString("N")+".png");
+                    using(var image=LocalOcr.CaptureRegion(region))image.Save(temporary,System.Drawing.Imaging.ImageFormat.Png);
+                    Show();recognize.Text="正在本机识别…";
+                    string text=await LocalOcr.Read(temporary);if(IsDisposed)return;
+                    ApplyOcrResult(text);
+                }catch(Exception ex){Show();MessageBox.Show(this,"识别未完成，原文和备注保留。\n"+ex.Message,"内容迁移",MessageBoxButtons.OK,MessageBoxIcon.Information);}
+                finally{
+                    if(temporary!=null)try{File.Delete(temporary);}catch{}
+                    if(!IsDisposed){recognizing=false;recognize.Enabled=true;cancel.Enabled=true;recognize.Text="乱码？从原文框选识别";updateSave();Show();inputReady=false;FocusInitialInput();}
+                }
+            };
             layout.Controls.Add(new Label { Text = "追加到：" + output, Dock = DockStyle.Fill, AutoEllipsis = true, ForeColor = Color.DimGray }, 0, 9);
             // Move existing rows down; preserve their height definitions and flexible preview rows.
             var originalControls = new List<Control>(); foreach (Control control in layout.Controls) originalControls.Add(control);
@@ -433,6 +488,7 @@ namespace ContentMover {
             Controls.Add(layout); CancelButton = cancel; KeyPreview = true;
             KeyDown += delegate(object sender, KeyEventArgs e) { if (e.Control && e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; save.PerformClick(); } };
             Shown += delegate { FocusInitialInput();if(!inputReady)focusRetry.Start(); };
+            FormClosing+=delegate(object sender,FormClosingEventArgs e){if(recognizing)e.Cancel=true;};
             focusRetry.Tick+=delegate{FocusInitialInput();if(inputReady || ++focusAttempts>=3)focusRetry.Stop();};
             FormClosed+=delegate{focusRetry.Dispose();};
         }
@@ -445,7 +501,7 @@ namespace ContentMover {
                 // The floating entry deliberately leaves the source active. Transfer actual Windows
                 // keyboard ownership as well as WinForms' logical focus when opening the editor.
                 if(foregroundThread!=0 && foregroundThread!=ownThread)attached=Native.AttachThreadInput(ownThread,foregroundThread,true);
-                Native.SetForegroundWindow(Handle);Activate();ActiveControl=target;target.Select();target.Focus();
+                Native.SetForegroundWindow(Handle);Activate();ActiveControl=target;target.Focus();target.SelectionStart=target.Text.Length;target.SelectionLength=0;
                 if(Native.GetForegroundWindow()==Handle)Native.SetFocus(target.Handle);
             }finally{if(attached)Native.AttachThreadInput(ownThread,foregroundThread,false);}
             inputReady=Native.GetForegroundWindow()==Handle && target.Focused;
@@ -556,6 +612,7 @@ namespace ContentMover {
         public Rectangle ButtonBounds { get { return floating.Bounds; } }
         public void Stop() { if(!shuttingDown){shuttingDown=true;probeCancellation.Cancel();mouseMonitor.Dispose();}Close();Dispose();Application.ExitThread(); }
         public void ClickCaptureForTest() { CaptureSelection(sourceWindow, true); }
+        public void SetSelectionForCopyTest(IntPtr window,string text){selectionWindow=window;selectionTask=Task.FromResult(new SelectionResult{Text=text,HasSelection=true});}
         public async void CaptureSelection(IntPtr hwnd, bool dismissMenu) {
             if (busy || hwnd == IntPtr.Zero || Native.Pid(hwnd) == (uint)Process.GetCurrentProcess().Id) return;
             busy = true; expiry.Stop(); floating.Hide();
@@ -567,11 +624,12 @@ namespace ContentMover {
             uint sequenceAfterCopy = 0;
             bool copied = false;
             string clipboardFallback = "";
+            string accessibilityFallback="";
             try {
                 // Read before Escape can collapse a webview selection. Never block the mouse hook.
                 Task<SelectionResult> selection = dismissMenu && selectionWindow == hwnd && selectionTask != null
                     ? selectionTask : SelectionReader.Start(hwnd, null);
-                clip.Text=(await selection).Text;
+                accessibilityFallback=(await selection).Text;
                 selectionTask = null;
                 try { if (Clipboard.ContainsText(TextDataFormat.UnicodeText)) clipboardFallback = Clipboard.GetText(TextDataFormat.UnicodeText); } catch (ExternalException) { }
                 try {
@@ -583,11 +641,9 @@ namespace ContentMover {
                         } previous = snapshot;
                     }
                 } catch { /* Capturing must still work when another app temporarily locks the clipboard. */ }
-                if (!String.IsNullOrEmpty(clip.Text)) {
-                    clip.Fidelity = "Windows 辅助功能接口提供的选区原文";
-                    if (dismissMenu && Native.GetForegroundWindow() == hwnd) Native.Keys(0x1B);
-                } else {
-                if (!Native.SetForegroundWindow(hwnd) && Native.GetForegroundWindow() != hwnd) throw new InvalidOperationException("无法切回来源窗口，请重新选中文字后按 Ctrl+Alt+M。");
+                // Accessibility text is only evidence of selection: PDF providers can return
+                // substituted glyphs. Always request the application's fresh copy as the original.
+                if (!Native.ActivateSource(hwnd)) throw new InvalidOperationException("无法切回来源窗口，请重新选中文字后按 Ctrl+Alt+M。");
                 if (dismissMenu) { Native.Keys(0x1B); await Task.Delay(130); }
                 if (Native.GetForegroundWindow() != hwnd) throw new InvalidOperationException("来源窗口已经改变，请重新选中文字。");
                 uint before = Native.GetClipboardSequenceNumber();
@@ -598,19 +654,18 @@ namespace ContentMover {
                     try {
                         sequenceAfterCopy = Native.GetClipboardSequenceNumber();
                         if (Clipboard.ContainsText(TextDataFormat.UnicodeText)) {
-                            clip.Text = Clipboard.GetText(TextDataFormat.UnicodeText);
-                            sequenceAfterCopy = Native.GetClipboardSequenceNumber(); copied = !String.IsNullOrEmpty(clip.Text);
+                            string fresh=Clipboard.GetText(TextDataFormat.UnicodeText);
+                            sequenceAfterCopy = Native.GetClipboardSequenceNumber(); copied = CapturePolicy.UseFreshCopy(clip,fresh);
                             if (copied) break;
                         }
                     } catch (ExternalException) { }
                 }
                 if (!copied) {
-                    if (String.IsNullOrEmpty(clipboardFallback)) throw new InvalidOperationException("这个应用未提供可读取的选区，剪贴板也没有文字。\n请选中文字后按 Ctrl+C，再点内容迁移；新版会显示已复制的文字供核对。");
-                    CapturePolicy.UseClipboardFallback(clip, clipboardFallback);
-                }
+                    if (!CapturePolicy.UseClipboardFallback(clip, clipboardFallback) && !CapturePolicy.UseAccessibilityFallback(clip,accessibilityFallback))
+                        throw new InvalidOperationException("未取得本次复制文本。\n请选中文字后按 Ctrl+C，再点内容迁移并核对预览。");
                 }
             } catch (Exception ex) {
-                if (CapturePolicy.UseClipboardFallback(clip, clipboardFallback)) { }
+                if (CapturePolicy.UseClipboardFallback(clip, clipboardFallback) || CapturePolicy.UseAccessibilityFallback(clip,accessibilityFallback)) { }
                 else { Error(ex.Message); busy = false; return; }
             }
             finally {
@@ -624,7 +679,7 @@ namespace ContentMover {
                 var worker = new Thread(delegate() { try { metadata.TrySetResult(ReadSource(hwnd, pid, clip)); } catch { metadata.TrySetResult(clip); } });
                 worker.IsBackground = true; worker.SetApartmentState(ApartmentState.STA); worker.Start();
                 if (await Task.WhenAny(metadata.Task, Task.Delay(1800)) == metadata.Task) clip = await metadata.Task;
-                busy = false; EditClip(clip);
+                busy = false; EditClip(clip,hwnd);
             } catch (Exception ex) { busy = false; Error(ex.Message); }
         }
         static Clip ReadSource(IntPtr hwnd, uint pid, Clip clip) {
@@ -671,13 +726,13 @@ namespace ContentMover {
             }
             return result;
         }
-        void EditClip(Clip clip) {
+        void EditClip(Clip clip,IntPtr sourceWindow) {
             floating.Hide();
             if (busy) { Error("已有一条摘录正在处理，请完成或取消后再试。"); return; }
             if (String.IsNullOrEmpty(clip.Text)) { Error("没有选中文字，未保存任何内容。"); return; }
             if (TestMode) { if (TestCaptured != null) TestCaptured(clip); return; }
             busy = true;
-            try { EnsureOutput(); using (var editor = new NoteDialog(clip, settings.OutputPath)) {
+            try { EnsureOutput(); using (var editor = new NoteDialog(clip, settings.OutputPath,sourceWindow)) {
                 if (editor.ShowDialog() == DialogResult.OK) Notify("已保存到内容迁移 TXT", "原文、来源和备注已追加。点击此通知可打开文件。");
             } } finally { busy = false; }
         }
@@ -747,6 +802,8 @@ namespace ContentMover {
                 }
                 if (args.Length > 0 && args[0] == "--self-test") { SelfTest(); return; }
                 if (args.Length > 0 && args[0] == "--focus-test") { FocusTest(); return; }
+                if (args.Length > 0 && args[0] == "--copy-test") { CopyTest(); return; }
+                if (args.Length > 0 && args[0] == "--ocr-test") { OcrTest(); return; }
                 if (args.Length > 0 && args[0] == "--render-test") { RenderTest(); return; }
                 if (args.Length > 0 && args[0] == "--integration-test") { IntegrationTest(); return; }
                 bool created;
@@ -794,6 +851,58 @@ namespace ContentMover {
             }
         }
         static void Assert(bool condition, string message) { if (!condition) throw new Exception("TEST FAILED: " + message); }
+        static void OcrTest() {
+            string imagePath=Path.Combine(TestFolder(),"ocr-fixture.png"),savedPath=Path.Combine(TestFolder(),"ocr-storage-"+Guid.NewGuid().ToString("N")+".txt");
+            using(var image=new Bitmap(1100,120))using(var graphics=Graphics.FromImage(image))using(var font=new Font("Microsoft YaHei",25)) {
+                graphics.Clear(Color.White);graphics.DrawString("其主要由 3 个两电平 VSC 组成的 FID",font,Brushes.Black,10,20);image.Save(imagePath);
+            }
+            string recognized=LocalOcr.Read(imagePath).GetAwaiter().GetResult();Assert(recognized.Contains("VSC") && recognized.Contains("FID"),"本机OCR识别论文中的拉丁字母");
+            using(var editor=new NoteDialog(new Clip{Text="复制产生的乱码",Title="论文",App="测试"},savedPath)) {
+                editor.Show();Application.DoEvents();editor.NoteBox.Text="备注保留";editor.ApplyOcrResult(recognized);
+                Assert(!editor.SaveButton.Enabled && !editor.PreviewBox.ReadOnly,"识别结果需核对且可修正");
+                editor.PreviewBox.Text="其主要由 3 个两电平 VSC 组成的 FID";
+                editor.ConfirmationBox.Checked=true;Assert(editor.SaveButton.Enabled,"核对后允许保存");editor.SaveButton.PerformClick();
+                string saved=File.ReadAllText(savedPath);Assert(saved.Contains("其主要由 3 个两电平 VSC 组成的 FID") && saved.Contains("备注保留") && !saved.Contains("复制产生的乱码"),"修正后的识别原文与备注保存正确");
+            }
+            File.WriteAllText(Path.Combine(TestFolder(),"ocr-test.txt"),"PASS: Windows local OCR VSC/FID; editable preview; confirmation required; corrected text and notes stored.");
+        }
+        static void CopyTest() {
+            Process fixture=null;IDataObject original=Clipboard.GetDataObject();
+            using(var controller=new Controller(new Settings(),true))using(var start=new System.Windows.Forms.Timer{Interval=200})using(var deadline=new System.Windows.Forms.Timer{Interval=12000}) {
+                Action<string> fail=delegate(string message){File.WriteAllText(Path.Combine(TestFolder(),"copy-test.txt"),"FAIL: "+message);Environment.ExitCode=1;controller.Stop();};
+                controller.TestError=fail;
+                controller.TestCaptured=delegate(Clip clip){
+                    try {
+                        if(clip.Text!=FixtureText)File.WriteAllText(Path.Combine(TestFolder(),"copy-debug.txt"),clip.Fidelity+"\n"+Convert.ToBase64String(Encoding.UTF8.GetBytes(clip.Text)));
+                        Assert(clip.Text==FixtureText,"实际复制文本替换损坏的辅助功能选区");
+                        Assert(!clip.RequiresConfirmation && clip.Fidelity=="应用复制提供的纯文本","确认使用本次应用复制结果");
+                        Assert(Clipboard.GetText()=="测试前的剪贴板内容","复制后恢复之前的剪贴板");
+                        string path=Path.Combine(TestFolder(),"copy-fidelity.txt");Storage.Append(path,clip,"验证复制优先","测试窗口");
+                        Assert(File.ReadAllText(path).Contains(FixtureText),"保存原样保留复制文本");
+                        File.WriteAllText(Path.Combine(TestFolder(),"copy-test.txt"),"PASS: real Ctrl+C overrides corrupted accessibility text; Unicode/whitespace preserved; clipboard restored; stored text matches copy.");
+                        controller.Stop();
+                    }catch(Exception ex){fail(ex.Message);}
+                };
+                start.Tick+=async delegate {
+                    start.Stop();
+                    try {
+                        fixture=Process.Start(new ProcessStartInfo(Application.ExecutablePath,"--fixture"){UseShellExecute=false,WindowStyle=ProcessWindowStyle.Normal});
+                        await Task.Delay(600);fixture.Refresh();IntPtr source=fixture.MainWindowHandle;Assert(source!=IntPtr.Zero,"复制测试窗口启动");
+                        uint unusedPid;uint other=Native.GetWindowThreadProcessId(Native.GetForegroundWindow(),out unusedPid),own=Native.GetCurrentThreadId();
+                        bool attached=other!=own && Native.AttachThreadInput(own,other,true);
+                        try{Native.ActivateSource(source);}finally{if(attached)Native.AttachThreadInput(own,other,false);}
+                        await Task.Delay(100);Assert(Native.GetForegroundWindow()==source,"仅向测试来源窗口发送复制");
+                        Native.Keys(0x11,0x41);await Task.Delay(80);Clipboard.SetText("测试前的剪贴板内容");
+                        controller.SetSelectionForCopyTest(source,"两电平TP7组成的DQR&个低压");controller.CaptureSelection(source,true);
+                    }catch(Exception ex){fail(ex.Message);}
+                };
+                deadline.Tick+=delegate{fail("复制测试超时");};
+                try{start.Start();deadline.Start();Application.Run(controller);}finally{
+                    if(fixture!=null && !fixture.HasExited)fixture.CloseMainWindow();
+                    if(original!=null)Clipboard.SetDataObject(original,true);
+                }
+            }
+        }
         static void FocusTest() {
             Process fixture=null;
             try {
@@ -836,6 +945,9 @@ namespace ContentMover {
             Assert(File.ReadAllText(path) == first + Storage.Format(clip, "", ""), "追加不覆盖");
             Assert(File.ReadAllText(path).Contains(FixtureText), "中文、空格、换行、制表符、表情原样保留");
             Assert(!first.Contains("文本来源："), "TXT 不再显示文本来源元信息");
+            var pdfCopy=new Clip{Text="两电平TP7组成的DQR&个低压"};string paper="其主要由 3 个两电平 VSC 组成的 FID";
+            Assert(CapturePolicy.UseFreshCopy(pdfCopy,paper) && pdfCopy.Text==paper && !pdfCopy.RequiresConfirmation,"应用复制覆盖PDF接口错误字符");
+            Assert(CapturePolicy.UseAccessibilityFallback(pdfCopy,"未验证选区") && pdfCopy.RequiresConfirmation,"仅辅助功能读取时必须核对");
             using(var fixture=new Form())using(var edit=new TextBox{Multiline=true,Text=FixtureText,Dock=DockStyle.Fill}) {
                 fixture.Controls.Add(edit);fixture.Show();edit.Focus();edit.SelectAll();Application.DoEvents();
                 Assert(Native.SelectedEditText(edit.Handle)==FixtureText,"原生编辑器选区保留Unicode和换行");
@@ -893,7 +1005,7 @@ namespace ContentMover {
         static void Fixture() {
             var form = new Form { Text = "内容迁移测试选区", Size = new Size(620, 330), StartPosition = FormStartPosition.CenterScreen, TopMost = true };
             var text = new TextBox { Multiline = true, Dock = DockStyle.Fill, Text = FixtureText, Font = new Font("Microsoft YaHei UI", 12) };
-            form.Controls.Add(text); form.Shown += delegate { text.Focus(); text.SelectAll(); }; Application.Run(form);
+            form.Controls.Add(text); form.Shown += delegate { text.Focus(); text.SelectAll(); };form.Activated+=delegate{text.Focus();text.SelectAll();}; Application.Run(form);
         }
         static void IntegrationTest() {
             string folder = TestFolder();

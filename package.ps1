@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $rootPath = $PSScriptRoot
 $stagePath = Join-Path $rootPath 'dist\内容迁移-Windows'
 New-Item -ItemType Directory -Path $stagePath -Force | Out-Null
-foreach ($name in @('内容迁移.exe','启动内容迁移.vbs','README.md','使用说明.md')) {
+foreach ($name in @('内容迁移.exe','启动内容迁移.vbs','README.md','使用说明.md','ocr.ps1')) {
     Copy-Item -LiteralPath (Join-Path $rootPath $name) -Destination $stagePath -Force
 }
 New-Item -ItemType Directory -Path (Join-Path $stagePath 'assets') -Force | Out-Null

@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 [assembly: AssemblyProduct("内容迁移安装程序")]
-[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyVersion("1.1.3.0")]
 static class InstallCore {
     public const string RegistryPath=@"Software\Microsoft\Windows\CurrentVersion\Uninstall\ContentMover";
     public static readonly string DefaultPath=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","ContentMover");
@@ -61,7 +61,7 @@ static class InstallCore {
         if(startup)File.WriteAllText(StartupPath,"CreateObject(\"WScript.Shell\").Run Chr(34) & \""+app.Replace("\"","\"\"")+"\" & Chr(34), 0, False\r\n",Encoding.Unicode);
         else if(File.Exists(StartupPath))File.Delete(StartupPath);
         using(var key=Registry.CurrentUser.CreateSubKey(RegistryPath)) {
-            key.SetValue("DisplayName","内容迁移");key.SetValue("DisplayVersion","1.1.2");key.SetValue("Publisher","guiii007");key.SetValue("InstallLocation",root);
+            key.SetValue("DisplayName","内容迁移");key.SetValue("DisplayVersion","1.1.3");key.SetValue("Publisher","guiii007");key.SetValue("InstallLocation",root);
             key.SetValue("UninstallString","\""+uninstall+"\" --uninstall");key.SetValue("DisplayIcon",app+",0");key.SetValue("NoModify",1);key.SetValue("NoRepair",1);
         }
     }
@@ -79,7 +79,7 @@ static class InstallCore {
         if(Directory.Exists(menu) && Directory.GetFileSystemEntries(menu).Length==0)Directory.Delete(menu);
         if(File.Exists(StartupPath) && File.ReadAllText(StartupPath).Contains(Path.Combine(root,"内容迁移.exe")))File.Delete(StartupPath);
         // Only known product files; leave config.json, personal files and desktop TXT untouched.
-        foreach(string file in new[]{"内容迁移.exe","启动内容迁移.vbs","README.md","使用说明.md","assets\\content-mover.ico","assets\\content-mover.png","卸载内容迁移.exe","installed-files.txt"}) {
+        foreach(string file in new[]{"内容迁移.exe","启动内容迁移.vbs","README.md","使用说明.md","ocr.ps1","assets\\content-mover.ico","assets\\content-mover.png","卸载内容迁移.exe","installed-files.txt"}) {
             string path=ChildPath(root,file);if(File.Exists(path))File.Delete(path);
         }
         string assets=ChildPath(root,"assets");if(Directory.Exists(assets) && Directory.GetFileSystemEntries(assets).Length==0)Directory.Delete(assets);
