@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.1.6.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.7.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -414,7 +414,7 @@ namespace ContentMover {
         public static Point Placement(Point point,Size size,Rectangle area,Rectangle? menu,int gap) {
             int x,y;
             if(menu.HasValue) {
-                var bounds=menu.Value;x=bounds.Left-size.Width-gap;y=bounds.Top;
+                var bounds=menu.Value;x=bounds.Left-size.Width-gap;y=Math.Max(bounds.Top,Math.Min(point.Y-size.Height/2,bounds.Bottom-size.Height));
                 if(x<area.Left){x=bounds.Right+gap;if(x+size.Width>area.Right){x=bounds.Left;y=bounds.Top-size.Height-gap;if(y<area.Top)y=bounds.Bottom+gap;}}
             }else{x=point.X-size.Width-gap;y=point.Y;if(x<area.Left)x=point.X+gap;}
             return new Point(Math.Max(area.Left,Math.Min(x,area.Right-size.Width)),Math.Max(area.Top,Math.Min(y,area.Bottom-size.Height)));
@@ -436,6 +436,7 @@ namespace ContentMover {
         public Button SaveButton;
         public TextBox PreviewBox;
         public Action<string> ApplyOcrResult;
+        public Func<Func<Rectangle?>,Func<Rectangle,Task<string>>,Task> RunOcrWorkflow;
         readonly System.Windows.Forms.Timer focusRetry=new System.Windows.Forms.Timer{Interval=80};
         readonly bool needsTitle;
         bool inputReady;int focusAttempts;
@@ -493,28 +494,35 @@ namespace ContentMover {
                 preview.ReadOnly=false;preview.BackColor=Color.White;preview.Text=text;
                 confirm.Checked=false;confirm.Visible=true;sourceInfo.Text=clip.Fidelity;sourceInfo.ForeColor=Color.FromArgb(161,78,14);updateSave();
             };
-            recognize.Click+=async delegate {
-                string temporary=null;recognizing=true;recognize.Enabled=false;cancel.Enabled=false;updateSave();
+            RunOcrWorkflow=async delegate(Func<Rectangle?> pickRegion,Func<Rectangle,Task<string>> readRegion) {
+                if(recognizing || IsDisposed)return;
+                double originalOpacity=Opacity;bool originalTopMost=TopMost;
+                recognizing=true;recognize.Enabled=false;cancel.Enabled=false;updateSave();
                 try {
-                    Hide();
+                    // Hide() completes a modal ShowDialog loop. Keep the editor alive and visible
+                    // to WinForms while making it transparent for the explicit region selection.
+                    Opacity=0;TopMost=false;
                     if(sourceWindow!=IntPtr.Zero) {
                         uint unused;uint other=Native.GetWindowThreadProcessId(Native.GetForegroundWindow(),out unused),own=Native.GetCurrentThreadId();
                         bool attached=other!=0 && other!=own && Native.AttachThreadInput(own,other,true);
                         try{Native.SetForegroundWindow(sourceWindow);}finally{if(attached)Native.AttachThreadInput(own,other,false);}
                     }
-                    Rectangle region;using(var selector=new RegionSelector()){if(selector.ShowDialog()!=DialogResult.OK)return;region=selector.SelectedRegion;}
-                    await Task.Delay(200);
-                    temporary=Path.Combine(Path.GetTempPath(),"ContentMover-OCR-"+Guid.NewGuid().ToString("N")+".png");
-                    using(var image=LocalOcr.CaptureRegion(region))image.Save(temporary,System.Drawing.Imaging.ImageFormat.Png);
-                    Show();recognize.Text="正在本机识别…";
-                    string text=await LocalOcr.Read(temporary);if(IsDisposed)return;
+                    Rectangle? region=pickRegion();if(!region.HasValue)return;
+                    recognize.Text="正在本机识别…";
+                    string text=await readRegion(region.Value);if(IsDisposed)return;
                     ApplyOcrResult(text);
-                }catch(Exception ex){Show();MessageBox.Show(this,"识别未完成，原文和备注保留。\n"+ex.Message,"内容迁移",MessageBoxButtons.OK,MessageBoxIcon.Information);}
+                }catch(Exception ex){if(!IsDisposed){Opacity=originalOpacity;TopMost=originalTopMost;MessageBox.Show(this,"识别未完成，原文和备注保留。\n"+ex.Message,"内容迁移",MessageBoxButtons.OK,MessageBoxIcon.Information);}}
                 finally{
-                    if(temporary!=null)try{File.Delete(temporary);}catch{}
-                    if(!IsDisposed){recognizing=false;recognize.Enabled=true;cancel.Enabled=true;recognize.Text="乱码？从原文框选识别";updateSave();Show();inputReady=false;FocusInitialInput();}
+                    if(!IsDisposed){Opacity=originalOpacity;TopMost=originalTopMost;recognizing=false;recognize.Enabled=true;cancel.Enabled=true;recognize.Text="乱码？从原文框选识别";updateSave();inputReady=false;FocusInitialInput();}
                 }
             };
+            recognize.Click+=async delegate {await RunOcrWorkflow(delegate{
+                using(var selector=new RegionSelector()){return selector.ShowDialog(this)==DialogResult.OK ? (Rectangle?)selector.SelectedRegion : null;}
+            },async delegate(Rectangle region){
+                string temporary=Path.Combine(Path.GetTempPath(),"ContentMover-OCR-"+Guid.NewGuid().ToString("N")+".png");
+                try{await Task.Delay(200);using(var image=LocalOcr.CaptureRegion(region))image.Save(temporary,System.Drawing.Imaging.ImageFormat.Png);Opacity=1;TopMost=true;return await LocalOcr.Read(temporary);}
+                finally{try{File.Delete(temporary);}catch{}}
+            });};
             layout.Controls.Add(new Label { Text = "追加到：" + output, Dock = DockStyle.Fill, AutoEllipsis = true, ForeColor = Color.DimGray }, 0, 9);
             // Move existing rows down; preserve their height definitions and flexible preview rows.
             var originalControls = new List<Control>(); foreach (Control control in layout.Controls) originalControls.Add(control);
@@ -989,11 +997,31 @@ namespace ContentMover {
             Assert(File.ReadAllText(path) == first + Storage.Format(clip, "", ""), "追加不覆盖");
             Assert(File.ReadAllText(path).Contains(FixtureText), "中文、空格、换行、制表符、表情原样保留");
             Assert(!first.Contains("文本来源："), "TXT 不再显示文本来源元信息");
+            foreach(bool cancelSelection in new[]{false,true}) {
+                string modalPath=Path.Combine(folder,"modal-ocr-"+Guid.NewGuid().ToString("N")+".txt");
+                using(var editor=new NoteDialog(new Clip{Text="原来的预览",Title="论文标题",Source="论文路径"},modalPath)) {
+                    bool completed=false;Exception failure=null;editor.NoteBox.Text="识别前的备注";
+                    editor.Shown+=async delegate {
+                        try {
+                            await editor.RunOcrWorkflow(delegate{
+                                Assert(editor.Visible && !editor.IsDisposed && editor.Opacity==0,"框选时保留模态弹窗生命周期");
+                                return cancelSelection ? (Rectangle?)null : new Rectangle(50,50,200,80);
+                            },async delegate(Rectangle region){await Task.Delay(80);Assert(!editor.IsDisposed && editor.Visible,"识别等待期间弹窗不被释放");return "识别后的 VSC 和 FID";});
+                            Assert(editor.Visible && editor.Opacity==1 && editor.NoteBox.Text=="识别前的备注","识别或取消后恢复弹窗与备注");
+                            if(cancelSelection){Assert(editor.PreviewBox.Text=="原来的预览","取消框选保留原文");completed=true;editor.Close();}
+                            else{Assert(editor.PreviewBox.Text=="识别后的 VSC 和 FID" && !editor.SaveButton.Enabled,"识别结果要求核对");editor.ConfirmationBox.Checked=true;completed=true;editor.SaveButton.PerformClick();}
+                        }catch(Exception ex){failure=ex;editor.Close();}
+                    };
+                    editor.ShowDialog();if(failure!=null)throw failure;
+                    Assert(completed,"模态弹窗不会在框选中途提前退出");
+                    if(!cancelSelection)Assert(File.ReadAllText(modalPath).Contains("识别后的 VSC 和 FID") && File.ReadAllText(modalPath).Contains("识别前的备注"),"框选识别回到原弹窗并正确保存");
+                }
+            }
             var screen=new Rectangle(0,0,1920,1080);var button=new Size(92,30);
             var upwards=new Rectangle(742,344,890,534);Point location=FloatingButton.Placement(new Point(742,870),button,screen,upwards,8);
-            Assert(location==new Point(642,344),"向上展开菜单时入口仍对齐菜单左上角");
+            Assert(location==new Point(642,848),"向上展开菜单时入口贴近鼠标而非菜单顶部");
             Assert(!new Rectangle(location,button).IntersectsWith(upwards),"入口不被菜单遮挡");
-            Assert(FloatingButton.Placement(new Point(434,720),button,screen,new Rectangle(434,449,636,675),8)==new Point(334,449),"长菜单入口对齐菜单顶部而非右键位置");
+            Assert(FloatingButton.Placement(new Point(434,720),button,screen,new Rectangle(434,449,636,675),8)==new Point(334,705),"长菜单入口与鼠标所在高度对齐");
             var leftMenu=new Rectangle(2,200,400,500);location=FloatingButton.Placement(new Point(2,200),button,screen,leftMenu,8);
             Assert(location==new Point(410,200) && !new Rectangle(location,button).IntersectsWith(leftMenu),"屏幕左边缘改放菜单右侧");
             var wideMenu=new Rectangle(0,300,1920,500);location=FloatingButton.Placement(new Point(500,300),button,screen,wideMenu,8);
