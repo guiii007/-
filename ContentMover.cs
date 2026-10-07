@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.2.6.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.7.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -229,7 +229,7 @@ namespace ContentMover {
         public static bool IsSpecific(string value) {
             if (String.IsNullOrWhiteSpace(value)) return false;
             string title=value.Trim();
-            foreach (string generic in new string[]{"ChatGPT","ChatGPT - ChatGPT","聊天","Chats","Chat history","聊天记录","New chat","新聊天","新建聊天","主页","Home","设置","Settings"})
+            foreach (string generic in new string[]{"ChatGPT","Codex","ChatGPT - ChatGPT","聊天","Chats","Chat history","聊天记录","New chat","新聊天","新建聊天","主页","Home","设置","Settings"})
                 if (title.Equals(generic,StringComparison.OrdinalIgnoreCase)) return false;
             return true;
         }
@@ -242,7 +242,17 @@ namespace ContentMover {
         }
         public static string Read(IntPtr hwnd) {
             try {
-                var queue=new Queue<AutomationElement>(); queue.Enqueue(AutomationElement.FromHandle(hwnd));
+                var root=AutomationElement.FromHandle(hwnd);
+                // Chromium exposes the active page title independently of the native window caption.
+                // Read it before traversing a possibly very long conversation or its history sidebar.
+                var toolbar=root.FindFirst(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.ToolBar),new OrCondition(new PropertyCondition(AutomationElement.NameProperty,"聊天工具栏"),new PropertyCondition(AutomationElement.NameProperty,"Chat toolbar"),new PropertyCondition(AutomationElement.NameProperty,"Conversation toolbar"))));
+                if(toolbar!=null && !toolbar.Current.IsOffscreen){
+                    var texts=toolbar.FindAll(TreeScope.Children,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text));
+                    foreach(AutomationElement text in texts)if(!text.Current.IsOffscreen && IsPageTitle(text.Current.Name))return text.Current.Name.Trim();
+                }
+                var document=root.FindFirst(TreeScope.Descendants,new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Document),new PropertyCondition(AutomationElement.AutomationIdProperty,"RootWebArea")));
+                if(document!=null && !document.Current.IsOffscreen && IsPageTitle(document.Current.Name))return document.Current.Name.Trim();
+                var queue=new Queue<AutomationElement>(); queue.Enqueue(root);
                 var timer=Stopwatch.StartNew(); string best=""; int score=0, visited=0;
                 while(queue.Count>0 && ++visited<1400 && timer.ElapsedMilliseconds<1000) {
                     var element=queue.Dequeue();
@@ -262,6 +272,7 @@ namespace ContentMover {
                 return best;
             } catch {return "";}
         }
+        public static bool IsPageTitle(string value){Uri uri;return IsSpecific(value) && value.Length<=1000 && !(Uri.TryCreate(value,UriKind.Absolute,out uri) && (uri.Scheme=="app" || uri.Scheme=="http" || uri.Scheme=="https" || uri.Scheme=="file"));}
     }
     static class Native {
         public const int WH_MOUSE_LL = 14, WM_RBUTTONUP = 0x205, WM_LBUTTONDOWN = 0x201, WM_HOTKEY = 0x312;
@@ -587,7 +598,7 @@ namespace ContentMover {
                 Shown+=async delegate{try{if(await Task.WhenAny(metadata,Task.Delay(1800))!=metadata)return;var information=await metadata;
                     if(IsDisposed || !Visible || DialogResult!=DialogResult.None)return;
                     if(SourceBox.Text==initialSource)SourceBox.Text=information.Source;
-                    if(TitleBox.Text==initialTitle && !information.RequiresTitle){TitleBox.Text=information.Title;clip.RequiresTitle=false;titleLabel.Text="标题（可修改，便于以后回溯）";titleLabel.ForeColor=ForeColor;}
+                    if(TitleBox.Text==initialTitle && !information.RequiresTitle){bool focusNote=clip.RequiresTitle && TitleBox.Focused;TitleBox.Text=information.Title;clip.RequiresTitle=false;titleLabel.Text="标题（可修改，便于以后回溯）";titleLabel.ForeColor=ForeColor;if(focusNote)NoteBox.Focus();}
                     clip.Detail=information.Detail;updateSave();
                 }catch{}};
             }
@@ -925,6 +936,7 @@ namespace ContentMover {
                     }
                 }
                 if (args.Length > 0 && args[0] == "--self-test") { SelfTest(); return; }
+                if(args.Length>1 && args[0]=="--title-probe"){var timer=Stopwatch.StartNew();string title=ChatTitleReader.Read(new IntPtr(Int64.Parse(args[1])));using(var output=new StreamWriter(Console.OpenStandardOutput(),new UTF8Encoding(false)))output.Write(new JavaScriptSerializer().Serialize(new{Title=title,Milliseconds=timer.ElapsedMilliseconds}));return;}
                 if (args.Length > 0 && args[0] == "--focus-test") { FocusTest(); return; }
                 if (args.Length > 0 && args[0] == "--copy-test") { CopyTest(); return; }
                 if (args.Length > 0 && args[0] == "--image-test") { ImageTest(); return; }
@@ -1096,6 +1108,12 @@ namespace ContentMover {
                 Assert(editor.TitleBox.Text=="用户标题" && editor.SourceBox.Text=="用户出处" && editor.NoteBox.Text=="正在输入","后台出处不覆盖用户输入");editor.Close();
             }
             var screen=new Rectangle(0,0,1920,1080);var button=new Size(92,30);
+            var titleMetadata=new TaskCompletionSource<Clip>();
+            using(var editor=new NoteDialog(new Clip{Text=FixtureText,Title="ChatGPT",RequiresTitle=true},markdownPath,IntPtr.Zero,titleMetadata.Task)){
+                editor.Show();Application.DoEvents();Assert(!editor.SaveButton.Enabled,"缺失聊天标题时等待标题");
+                titleMetadata.SetResult(new Clip{Title="当前 Codex 聊天",RequiresTitle=false});Application.DoEvents();
+                Assert(editor.TitleBox.Text=="当前 Codex 聊天" && editor.SaveButton.Enabled,"后台取得聊天标题后自动填写并允许保存");editor.Close();
+            }
             var compact=new Rectangle(1173,374,221,131);Point compactLocation=FloatingButton.Placement(new Point(1173,450),button,screen,compact,8);
             Assert(compactLocation==new Point(1073,374) && !new Rectangle(compactLocation,button).IntersectsWith(compact),"Codex 短菜单入口放在左侧并对齐顶部");
             var upwards=new Rectangle(742,344,890,534);Point location=FloatingButton.Placement(new Point(742,870),button,screen,upwards,8);
@@ -1151,6 +1169,7 @@ namespace ContentMover {
                 entry.Stop();
             }
             Assert(ChatTitleReader.CandidateScore("ChatGPT",true,"page",true,true)==0, "不把应用名当成聊天标题");
+            Assert(!ChatTitleReader.IsPageTitle("Codex") && !ChatTitleReader.IsPageTitle("app://-/index.html") && ChatTitleReader.IsPageTitle("Debug: 截图粘贴"),"页面标题排除应用名和地址，保留含冒号的名称");
             Assert(ChatTitleReader.CandidateScore("历史聊天",false,"",false,true)==0, "不把其他历史聊天当成当前标题");
             Assert(ChatTitleReader.CandidateScore("当前聊天标题",true,"",false,true)==100, "接受已选中的聊天标题");
             Assert(ChatTitleReader.CandidateScore("当前聊天标题",false,"page",false,true)==90, "接受当前页导航标题");
