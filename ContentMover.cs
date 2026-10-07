@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.1.4.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.6.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -248,6 +248,26 @@ namespace ContentMover {
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window,IntPtr after,int x,int y,int width,int height,uint flags);
+        [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
+        public delegate bool EnumWindowProc(IntPtr window,IntPtr parameter);
+        [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowProc callback,IntPtr parameter);
+        public static Rectangle? ContextMenuBounds(IntPtr source,Point anchor) {
+            uint sourcePid=Pid(source);Rectangle? best=null;int bestDistance=Int32.MaxValue;
+            EnumWindows(delegate(IntPtr window,IntPtr ignored){
+                if(window==source || Pid(window)!=sourcePid || !IsWindowVisible(window))return true;
+                var className=new StringBuilder(100);GetClassName(window,className,className.Capacity);string name=className.ToString();
+                bool nativeMenu=name=="#32768";
+                bool popup=(GetWindowLong(window,-16)&unchecked((int)0x80000000))!=0;
+                if(!nativeMenu && !(popup && (name.StartsWith("Chrome_WidgetWin",StringComparison.Ordinal) || name.StartsWith("WindowsForms10",StringComparison.Ordinal) || name.IndexOf("NetUI",StringComparison.OrdinalIgnoreCase)>=0)))return true;
+                RECT rect;if(!GetWindowRect(window,out rect))return true;var bounds=Rectangle.FromLTRB(rect.Left,rect.Top,rect.Right,rect.Bottom);
+                if(bounds.Width<70 || bounds.Height<80)return true;
+                int distance=Math.Max(0,Math.Max(bounds.Left-anchor.X,anchor.X-bounds.Right))+Math.Max(0,Math.Max(bounds.Top-anchor.Y,anchor.Y-bounds.Bottom));
+                if(distance>90)return true;
+                if(distance<bestDistance || (distance==bestDistance && (!best.HasValue || (long)bounds.Width*bounds.Height>(long)best.Value.Width*best.Value.Height))){best=bounds;bestDistance=distance;}
+                return true;
+            },IntPtr.Zero);return best;
+        }
         public static bool ActivateSource(IntPtr window) {
             uint unused;uint own=GetCurrentThreadId(),foreground=GetWindowThreadProcessId(GetForegroundWindow(),out unused),target=GetWindowThreadProcessId(window,out unused);
             bool joinedForeground=false,joinedTarget=false;
@@ -391,12 +411,22 @@ namespace ContentMover {
             if (message.Msg == 0x21) { message.Result = new IntPtr(3); return; } // MA_NOACTIVATE
             base.WndProc(ref message);
         }
-        public void ShowAt(Point point) {
+        public static Point Placement(Point point,Size size,Rectangle area,Rectangle? menu,int gap) {
+            int x,y;
+            if(menu.HasValue) {
+                var bounds=menu.Value;x=bounds.Left-size.Width-gap;y=bounds.Top;
+                if(x<area.Left){x=bounds.Right+gap;if(x+size.Width>area.Right){x=bounds.Left;y=bounds.Top-size.Height-gap;if(y<area.Top)y=bounds.Bottom+gap;}}
+            }else{x=point.X-size.Width-gap;y=point.Y;if(x<area.Left)x=point.X+gap;}
+            return new Point(Math.Max(area.Left,Math.Min(x,area.Right-size.Width)),Math.Max(area.Top,Math.Min(y,area.Bottom-size.Height)));
+        }
+        public void ShowAt(Point point,Rectangle? menu=null) {
             Rectangle area = Screen.FromPoint(point).WorkingArea;
-            int x = point.X - Width - 12, y = point.Y + 6;
-            if (x < area.Left) { x = point.X + 12; y = point.Y - Height - 12; }
-            Location = new Point(Math.Max(area.Left, Math.Min(x, area.Right - Width)), Math.Max(area.Top, Math.Min(y, area.Bottom - Height)));
+            int gap;using(var graphics=CreateGraphics())gap=Math.Max(6,(int)Math.Round(8*graphics.DpiX/96f));
+            Location=Placement(point,Size,area,menu,gap);
             Show();
+            // Reassert topmost order after the source's native context menu has been created.
+            Native.SetWindowPos(Handle,new IntPtr(-1),Left,Top,Width,Height,0x10|0x40);
+            Native.ShowWindow(Handle,4);
         }
     }
     sealed class NoteDialog : Form {
@@ -554,7 +584,7 @@ namespace ContentMover {
             tray.ContextMenuStrip = menu; tray.DoubleClick += delegate { OpenFile(); };
             tray.BalloonTipClicked += delegate { OpenFile(); };
             floating.Chosen += delegate { CaptureSelection(sourceWindow, true); };
-            expiry.Interval = 14000; expiry.Tick += delegate { expiry.Stop(); floating.Hide(); };
+            expiry.Interval = 14000; expiry.Tick += delegate { expiry.Stop(); floating.Hide();RecordEntryStatus("entry-expired",false); };
             mouseMonitor=new MouseMonitor(delegate(int message,Native.MOUSE data,IntPtr window){
                 if(!shuttingDown)try{BeginInvoke(new Action(delegate{OnMouse(message,data,window);}));}catch{}
             });
@@ -616,11 +646,13 @@ namespace ContentMover {
                     result=await selection;
                 }
                 if(!result.HasSelection || generation!=selectionGeneration || busy || shuttingDown || !settings.RightClickEnabled)return;
-                sourceWindow=hwnd; floating.ShowAt(point); expiry.Stop(); expiry.Start();
+                Rectangle? menu=Native.ContextMenuBounds(hwnd,point);
+                if(!menu.HasValue && !TestMode){await Task.Delay(80);if(generation!=selectionGeneration || shuttingDown || busy)return;menu=Native.ContextMenuBounds(hwnd,point);}
+                sourceWindow=hwnd; floating.ShowAt(point,menu); expiry.Stop(); expiry.Start();
                 RecordEntryStatus("entry-shown",true);
             } catch { }
         }
-        void RecordEntryStatus(string stage,bool hasSelection){if(TestMode)return;try{File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"right-click.status.json"),new JavaScriptSerializer().Serialize(new{Time=DateTimeOffset.Now.ToString("o"),Stage=stage,HasSelection=hasSelection,HookRenewals=mouseMonitor.Renewals}));}catch{}}
+        void RecordEntryStatus(string stage,bool hasSelection){if(TestMode)return;try{File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"right-click.status.json"),new JavaScriptSerializer().Serialize(new{Time=DateTimeOffset.Now.ToString("o"),Stage=stage,HasSelection=hasSelection,HookRenewals=mouseMonitor.Renewals,Window=floating.Handle.ToInt64(),Visible=Native.IsWindowVisible(floating.Handle),Left=floating.Left,Top=floating.Top,Width=floating.Width,Height=floating.Height,Desktop=Native.DesktopName(Native.GetThreadDesktop(Native.GetCurrentThreadId()))}));}catch{}}
         public Rectangle ButtonBounds { get { return floating.Bounds; } }
         public void Stop() { if(!shuttingDown){shuttingDown=true;probeCancellation.Cancel();mouseMonitor.Dispose();}Close();Dispose();Application.ExitThread(); }
         public void ClickCaptureForTest() { CaptureSelection(sourceWindow, true); }
@@ -957,6 +989,20 @@ namespace ContentMover {
             Assert(File.ReadAllText(path) == first + Storage.Format(clip, "", ""), "追加不覆盖");
             Assert(File.ReadAllText(path).Contains(FixtureText), "中文、空格、换行、制表符、表情原样保留");
             Assert(!first.Contains("文本来源："), "TXT 不再显示文本来源元信息");
+            var screen=new Rectangle(0,0,1920,1080);var button=new Size(92,30);
+            var upwards=new Rectangle(742,344,890,534);Point location=FloatingButton.Placement(new Point(742,870),button,screen,upwards,8);
+            Assert(location==new Point(642,344),"向上展开菜单时入口仍对齐菜单左上角");
+            Assert(!new Rectangle(location,button).IntersectsWith(upwards),"入口不被菜单遮挡");
+            Assert(FloatingButton.Placement(new Point(434,720),button,screen,new Rectangle(434,449,636,675),8)==new Point(334,449),"长菜单入口对齐菜单顶部而非右键位置");
+            var leftMenu=new Rectangle(2,200,400,500);location=FloatingButton.Placement(new Point(2,200),button,screen,leftMenu,8);
+            Assert(location==new Point(410,200) && !new Rectangle(location,button).IntersectsWith(leftMenu),"屏幕左边缘改放菜单右侧");
+            var wideMenu=new Rectangle(0,300,1920,500);location=FloatingButton.Placement(new Point(500,300),button,screen,wideMenu,8);
+            Assert(location==new Point(0,262) && screen.Contains(new Rectangle(location,button)),"左右空间都不足时放到菜单上方");
+            using(var owner=new Form{Location=new Point(250,200),StartPosition=FormStartPosition.Manual})using(var popup=new ContextMenuStrip()) {
+                for(int i=0;i<8;i++)popup.Items.Add("菜单测试 "+i);owner.Show();var anchor=owner.PointToScreen(new Point(40,40));popup.Show(anchor);Application.DoEvents();
+                var found=Native.ContextMenuBounds(owner.Handle,anchor);Assert(found.HasValue && found.Value.IntersectsWith(popup.Bounds),"识别实际弹出菜单位置");
+                popup.Close();owner.Close();
+            }
             using(var monitor=new MouseMonitor(delegate{},80)) {
                 var wait=Stopwatch.StartNew();while(monitor.Renewals<2 && wait.ElapsedMilliseconds<1500){Application.DoEvents();Thread.Sleep(10);}
                 Assert(monitor.Renewals>=2,"鼠标监听定期重新注册成功");
