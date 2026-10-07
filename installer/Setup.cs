@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 [assembly: AssemblyProduct("内容迁移安装程序")]
-[assembly: AssemblyVersion("1.1.7.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
 static class InstallCore {
     public const string RegistryPath=@"Software\Microsoft\Windows\CurrentVersion\Uninstall\ContentMover";
     public static readonly string DefaultPath=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","ContentMover");
@@ -61,7 +61,7 @@ static class InstallCore {
         if(startup)File.WriteAllText(StartupPath,"CreateObject(\"WScript.Shell\").Run Chr(34) & \""+app.Replace("\"","\"\"")+"\" & Chr(34), 0, False\r\n",Encoding.Unicode);
         else if(File.Exists(StartupPath))File.Delete(StartupPath);
         using(var key=Registry.CurrentUser.CreateSubKey(RegistryPath)) {
-            key.SetValue("DisplayName","内容迁移");key.SetValue("DisplayVersion","1.1.7");key.SetValue("Publisher","guiii007");key.SetValue("InstallLocation",root);
+            key.SetValue("DisplayName","内容迁移");key.SetValue("DisplayVersion","1.2.0");key.SetValue("Publisher","guiii007");key.SetValue("InstallLocation",root);
             key.SetValue("UninstallString","\""+uninstall+"\" --uninstall");key.SetValue("DisplayIcon",app+",0");key.SetValue("NoModify",1);key.SetValue("NoRepair",1);
         }
     }
@@ -116,7 +116,7 @@ sealed class SetupWizard:Form {
     void Render() {
         foreach(Control control in body.Controls)control.Visible=false;detail.Visible=true;
         back.Visible=step==1;next.Enabled=step!=2;
-        if(step==0){heading.Text="欢迎安装内容迁移";detail.Text="把选中的文字、出处和备注，保存到桌面的一个文本文件。\n\n支持浏览器、Word、AI 客户端等应用。\n无需安装浏览器扩展。";next.Text="下一步";}
+        if(step==0){heading.Text="欢迎安装内容迁移";detail.Text="把选中的文字、出处和备注，保存到桌面的 Markdown 文件。\n\n支持浏览器、Word、AI 客户端等应用。\n无需安装浏览器扩展。";next.Text="下一步";}
         if(step==1){heading.Text="选择安装选项";detail.Text="安装到当前 Windows 用户，无需管理员权限。\n安装前请保存或取消正在编辑的摘录。\n安装位置：";folder.Visible=true;desktop.Visible=true;startup.Visible=true;foreach(Control c in body.Controls)if((string)c.Tag=="options")c.Visible=true;next.Text="安装";}
         if(step==2){heading.Text="正在安装";detail.Text="正在复制程序并创建快捷方式，请稍候…";progress.Visible=true;progress.Style=ProgressBarStyle.Marquee;next.Text="安装中";}
         if(step==3){heading.Text="安装完成";detail.Text="选中文字 → 鼠标右键 → 内容迁移 → 添加备注并保存。\n\n桌面快捷方式可打开软件设置。\n也可使用快捷键 Ctrl+Alt+M。";launch.Visible=true;next.Text="完成";}
@@ -130,7 +130,7 @@ static class SetupProgram {
             if(args.Length>1 && args[0]=="--self-test") {
                 string root=Path.GetFullPath(args[1]);Directory.CreateDirectory(root);File.WriteAllText(Path.Combine(root,"config.json"),"preserve-settings");
                 var files=InstallCore.Extract(root);
-                if(!File.Exists(Path.Combine(root,"内容迁移.exe")) || File.ReadAllText(Path.Combine(root,"config.json"))!="preserve-settings" || files.Exists(x=>x.Contains("browser-extension")))throw new Exception("安装包提取或设置保留测试失败。");
+                if(!File.Exists(Path.Combine(root,"内容迁移.exe")) || File.ReadAllText(Path.Combine(root,"config.json"))!="preserve-settings" || files.Exists(x=>x.Contains("browser-extension") || x=="ocr.ps1"))throw new Exception("安装包提取或设置保留测试失败。");
                 bool rejected=false;try{InstallCore.ChildPath(root,"..\\escape.txt");}catch(InvalidDataException){rejected=true;}if(!rejected)throw new Exception("路径越界保护失败。");
                 File.WriteAllText(Path.Combine(root,"installer-test.txt"),"PASS: embedded payload; executable; preserved config; no extension; path traversal rejected.");return;
             }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.1.7.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -32,13 +32,13 @@ namespace ContentMover {
     }
     static class SelectionReader {
         static readonly SemaphoreSlim Workers = new SemaphoreSlim(2, 2);
-        public static async Task<SelectionResult> Start(IntPtr hwnd, Point? point, CancellationToken cancellation = default(CancellationToken)) {
+        public static async Task<SelectionResult> Start(IntPtr hwnd, Point? point, CancellationToken cancellation = default(CancellationToken),bool menuOnly=false) {
             try { await Workers.WaitAsync(cancellation); } catch(OperationCanceledException) {return new SelectionResult();}
             try {
                 return await Task.Run(delegate {
                     if(cancellation.IsCancellationRequested)return new SelectionResult();
                     var info=new ProcessStartInfo(Application.ExecutablePath,"--selection-probe " + hwnd.ToInt64() + " " +
-                        (point.HasValue ? point.Value.X + " " + point.Value.Y : "none")) {
+                        (point.HasValue ? point.Value.X + " " + point.Value.Y : "none")+(menuOnly ? " menu" : "")) {
                         UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,
                         RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=Encoding.UTF8
                     };
@@ -95,9 +95,9 @@ namespace ContentMover {
             }
             return "";
         }
-        public static SelectionResult Probe(IntPtr hwnd,Point? point) {
+        public static SelectionResult Probe(IntPtr hwnd,Point? point,bool menuOnly=false) {
             var result=new SelectionResult();
-            try {result.Text=Read(hwnd,point);if(result.Text.Length>0){result.HasSelection=true;return result;}}catch{}
+            if(!menuOnly)try {result.Text=Read(hwnd,point);if(result.Text.Length>0){result.HasSelection=true;return result;}}catch{}
             result.HasSelection=ContextCopyEnabled(hwnd,point);return result;
         }
         static bool ContextCopyEnabled(IntPtr hwnd,Point? point) {
@@ -105,22 +105,31 @@ namespace ContentMover {
             string app="";try{app=Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();}catch{return false;}
             if(app=="explorer")return false;
             bool textApp=app=="msedge" || app=="chrome" || app=="firefox" || app=="brave" || app=="winword" ||
-                app=="notepad" || app.Contains("deepseek") || app=="chatgpt" || app=="codex";
+                app=="notepad" || app.Contains("deepseek") || app.Contains("chatgpt") || app.Contains("codex");
             if(!textApp)return false;
             try {
                 var roots=new List<AutomationElement>{AutomationElement.FromHandle(hwnd)};
+                Rectangle? popupBounds=point.HasValue ? Native.ContextMenuBounds(hwnd,point.Value) : (Rectangle?)null;
+                if(popupBounds.HasValue){var bounds=popupBounds.Value;var hit=AutomationElement.FromPoint(new System.Windows.Point(bounds.Left+10,bounds.Top+10));
+                    for(int i=0;hit!=null && i<12;i++){var rect=hit.Current.BoundingRectangle;if(rect.Width>=bounds.Width-10 && rect.Height>=bounds.Height-10){roots.Add(hit);break;}hit=TreeWalker.RawViewWalker.GetParent(hit);}}
                 var menus=AutomationElement.RootElement.FindAll(TreeScope.Children,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Menu));
-                foreach(AutomationElement menu in menus)if(menu.Current.ProcessId==(int)pid && !menu.Current.IsOffscreen)roots.Add(menu);
+                foreach(AutomationElement menu in menus)if(!menu.Current.IsOffscreen && (menu.Current.ProcessId==(int)pid || (point.HasValue && menu.Current.BoundingRectangle.Contains(new System.Windows.Point(point.Value.X,point.Value.Y)))))roots.Add(menu);
                 if(point.HasValue) {
                     var hit=AutomationElement.FromPoint(new System.Windows.Point(point.Value.X+20,point.Value.Y+20));
-                    for(int i=0;hit!=null && i<8;i++){if(hit.Current.ControlType==ControlType.Menu && hit.Current.ProcessId==(int)pid){roots.Add(hit);break;}hit=TreeWalker.RawViewWalker.GetParent(hit);}
+                    for(int i=0;hit!=null && i<8;i++){if(hit.Current.ControlType==ControlType.Menu){roots.Add(hit);break;}hit=TreeWalker.RawViewWalker.GetParent(hit);}
                 }
                 foreach(var root in roots) {
-                    var items=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.MenuItem));
+                    var items=root.FindAll(TreeScope.Descendants,new OrCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.MenuItem),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text)));
                     foreach(AutomationElement item in items) {
                         string name=item.Current.Name.Trim();int tab=name.IndexOf('\t');if(tab>=0)name=name.Substring(0,tab).Trim();
                         bool copy=System.Text.RegularExpressions.Regex.IsMatch(name.Replace("&",""),@"^(复制|Copy)\s*(\([cC]\))?(\s+Ctrl\+C)?$",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                        if(copy && item.Current.IsEnabled && !item.Current.IsOffscreen)return true;
+                        if(copy && item.Current.IsEnabled && !item.Current.IsOffscreen){
+                            if(item.Current.ControlType==ControlType.MenuItem || root.Current.ControlType==ControlType.Menu)return true;
+                            var rect=item.Current.BoundingRectangle;
+                            if(popupBounds.HasValue && popupBounds.Value.Contains(new Point((int)(rect.Left+rect.Width/2),(int)(rect.Top+rect.Height/2))))return true;
+                            var ancestor=TreeWalker.ControlViewWalker.GetParent(item);
+                            for(int i=0;ancestor!=null && i<8;i++){if(ancestor.Current.ControlType==ControlType.Menu)return true;if(ancestor==root)break;ancestor=TreeWalker.ControlViewWalker.GetParent(ancestor);}
+                        }
                     }
                 }
             }catch{}
@@ -134,11 +143,12 @@ namespace ContentMover {
         public bool RightClickEnabled = true;
     }
     static class OutputFiles {
-        public static string DatedPath(string desktop,DateTime date){return Path.Combine(desktop,"内容迁移"+date.ToString("yyyy-M-d",System.Globalization.CultureInfo.InvariantCulture)+".txt");}
+        public static string DatedPath(string desktop,DateTime date){return Path.Combine(desktop,"内容迁移"+date.ToString("yyyy-M-d",System.Globalization.CultureInfo.InvariantCulture)+".md");}
         public static string Resolve(string path,bool custom,string desktop,DateTime date) {
+            if(Path.GetExtension(path).Equals(".txt",StringComparison.OrdinalIgnoreCase))return custom ? Path.ChangeExtension(path,".md") : DatedPath(desktop,date);
             if(custom || File.Exists(path))return path;
             bool onDesktop=String.Equals(Path.GetDirectoryName(Path.GetFullPath(path)),Path.GetFullPath(desktop).TrimEnd(Path.DirectorySeparatorChar),StringComparison.OrdinalIgnoreCase);
-            bool defaultName=System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(path),@"^内容迁移(\d{4}-\d{1,2}-\d{1,2})?\.txt$",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            bool defaultName=System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(path),@"^内容迁移(\d{4}-\d{1,2}-\d{1,2})?\.md$",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             return onDesktop && defaultName ? DatedPath(desktop,date) : path;
         }
     }
@@ -150,6 +160,14 @@ namespace ContentMover {
     }
     static class Storage {
         static readonly object Gate = new object();
+        static string Metadata(string text){return (text ?? "").Replace("\\","\\\\").Replace("*","\\*").Replace("_","\\_").Replace("[","\\[").Replace("]","\\]").Replace("<","&lt;").Replace(">","&gt;").Replace("\r"," ").Replace("\n"," ");}
+        public static string FormatMarkdown(Clip clip,string note,string source) {
+            return "\r\n## "+Metadata(String.IsNullOrWhiteSpace(clip.Title) ? "内容迁移" : clip.Title)+"\r\n\r\n"+
+                "- **采集时间：** "+clip.CapturedAt.ToString("yyyy-MM-dd HH:mm:ss zzz")+"\r\n- **应用：** "+Metadata(clip.App)+"\r\n"+
+                "- **出处：** "+Metadata(String.IsNullOrEmpty(source) ? "未取得网址或文件路径，请补充出处。" : source)+"\r\n"+
+                (String.IsNullOrEmpty(clip.Detail) ? "" : "- **定位信息：** "+Metadata(clip.Detail)+"\r\n")+
+                "\r\n### 备注\r\n\r\n"+note+"\r\n\r\n### 原文\r\n\r\n"+clip.Text+"\r\n\r\n---\r\n";
+        }
         public static string Format(Clip clip, string note, string source) {
             return "\r\n================ 内容迁移 ================\r\n" +
                 "采集时间：" + clip.CapturedAt.ToString("yyyy-MM-dd HH:mm:ss zzz") + "\r\n" +
@@ -163,7 +181,7 @@ namespace ContentMover {
         public static void Append(string path, Clip clip, string note, string source) {
             lock (Gate) {
                 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path)));
-                byte[] bytes = new UTF8Encoding(false).GetBytes(Format(clip, note, source));
+                byte[] bytes = new UTF8Encoding(false).GetBytes(Path.GetExtension(path).Equals(".md",StringComparison.OrdinalIgnoreCase) ? FormatMarkdown(clip,note,source) : Format(clip, note, source));
                 // One append operation; never rewrite or truncate prior entries.
                 using (var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read)) {
                     stream.Write(bytes, 0, bytes.Length); stream.Flush(true);
@@ -252,10 +270,12 @@ namespace ContentMover {
         [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
         public delegate bool EnumWindowProc(IntPtr window,IntPtr parameter);
         [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowProc callback,IntPtr parameter);
+        [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr window,uint command);
         public static Rectangle? ContextMenuBounds(IntPtr source,Point anchor) {
             uint sourcePid=Pid(source);Rectangle? best=null;int bestDistance=Int32.MaxValue;
             EnumWindows(delegate(IntPtr window,IntPtr ignored){
-                if(window==source || Pid(window)!=sourcePid || !IsWindowVisible(window))return true;
+                if(window==source || !IsWindowVisible(window))return true;
+                if(Pid(window)!=sourcePid){IntPtr owner=GetWindow(window,4);bool belongs=false;for(int i=0;owner!=IntPtr.Zero && i<8;i++){if(owner==source || Pid(owner)==sourcePid){belongs=true;break;}owner=GetWindow(owner,4);}if(!belongs)return true;}
                 var className=new StringBuilder(100);GetClassName(window,className,className.Capacity);string name=className.ToString();
                 bool nativeMenu=name=="#32768";
                 bool popup=(GetWindowLong(window,-16)&unchecked((int)0x80000000))!=0;
@@ -274,10 +294,12 @@ namespace ContentMover {
             try {
                 if(foreground!=0 && foreground!=own)joinedForeground=AttachThreadInput(own,foreground,true);
                 if(target!=0 && target!=own && target!=foreground)joinedTarget=AttachThreadInput(own,target,true);
-                ShowWindow(window,5);BringWindowToTop(window);SetForegroundWindow(window);return GetForegroundWindow()==window;
+                if(GetForegroundWindow()!=window)SetForegroundWindow(window);return GetForegroundWindow()==window;
             }finally{if(joinedTarget)AttachThreadInput(own,target,false);if(joinedForeground)AttachThreadInput(own,foreground,false);}
         }
         [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
+        [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
         [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
         [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
@@ -435,12 +457,10 @@ namespace ContentMover {
         public CheckBox ConfirmationBox;
         public Button SaveButton;
         public TextBox PreviewBox;
-        public Action<string> ApplyOcrResult;
-        public Func<Func<Rectangle?>,Func<Rectangle,Task<string>>,Task> RunOcrWorkflow;
         readonly System.Windows.Forms.Timer focusRetry=new System.Windows.Forms.Timer{Interval=80};
         readonly bool needsTitle;
         bool inputReady;int focusAttempts;
-        public NoteDialog(Clip clip, string output,IntPtr sourceWindow=default(IntPtr)) {
+        public NoteDialog(Clip clip, string output,IntPtr sourceWindow=default(IntPtr),Task<Clip> metadata=null) {
             needsTitle=clip.RequiresTitle;
             Icon = AppIcon.Load();
             Text = "内容迁移 · 添加备注"; Font = new Font("Microsoft YaHei UI", 9); AutoScaleMode = AutoScaleMode.Dpi;
@@ -459,13 +479,19 @@ namespace ContentMover {
             TitleBox.Text = clip.RequiresTitle ? "" : clip.Title; TitleBox.Dock = DockStyle.Fill;
             var previewHeading=new Panel{Dock=DockStyle.Fill};
             var countLabel=new Label{Text="原文预览 · "+clip.Text.Length+" 个字符",Dock=DockStyle.Fill};previewHeading.Controls.Add(countLabel);
-            var recognize=new LinkLabel{Text="乱码？从原文框选识别",Dock=DockStyle.Right,Width=178,TextAlign=ContentAlignment.MiddleRight,LinkBehavior=LinkBehavior.HoverUnderline};previewHeading.Controls.Add(recognize);
             layout.Controls.Add(previewHeading,0,3);
             var preview=new TextBox { Text = clip.Text, ReadOnly = true, Multiline = true, WordWrap = false,
                 ScrollBars = ScrollBars.Both, Dock = DockStyle.Fill, BackColor = Color.FromArgb(246, 248, 251) };
             PreviewBox=preview;
             layout.Controls.Add(preview,0,4);
-            layout.Controls.Add(new Label { Text = "备注（可以留空；Ctrl + Enter 保存，Esc 取消）", Dock = DockStyle.Fill, Padding = new Padding(0, 7, 0, 0) }, 0, 5);
+            var attachments=new Dictionary<string,string>();
+            var noteHeading=new Panel{Dock=DockStyle.Fill};
+            var addImage=new Button{Text="插入图片…",Dock=DockStyle.Right,Width=100};
+            noteHeading.Controls.Add(new Label{Text="备注（支持 Markdown；Ctrl + Enter 保存）",Dock=DockStyle.Fill,Padding=new Padding(0,7,0,0)});
+            noteHeading.Controls.Add(addImage);layout.Controls.Add(noteHeading,0,5);
+            addImage.Click+=delegate{using(var picker=new OpenFileDialog{Filter="图片|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp"}){if(picker.ShowDialog(this)!=DialogResult.OK)return;
+                string relative="assets/"+Guid.NewGuid().ToString("N")+Path.GetExtension(picker.FileName).ToLowerInvariant();attachments.Add(relative,picker.FileName);
+                NoteBox.SelectedText="\r\n![图片]("+relative+")\r\n";NoteBox.Focus();}};
             NoteBox.Multiline = true; NoteBox.AcceptsReturn = true; NoteBox.ScrollBars = ScrollBars.Vertical; NoteBox.Dock = DockStyle.Fill;
             layout.Controls.Add(NoteBox, 0, 6);
             var sourcePanel = new Panel { Dock = DockStyle.Fill };
@@ -476,53 +502,20 @@ namespace ContentMover {
             ConfirmationBox = confirm;
             sourcePanel.Controls.Add(confirm); layout.Controls.Add(sourcePanel, 0, 7);
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
-            var save = new Button { Text = "保存到 TXT", AutoSize = true, Height = 32 };
+            var save = new Button { Text = "保存到 Markdown", AutoSize = true, Height = 32 };
             SaveButton = save;
-            bool recognizing=false;
-            Action updateSave = delegate { save.Enabled = !recognizing && preview.Text.Length>0 && (!clip.RequiresConfirmation || confirm.Checked) && (!clip.RequiresTitle || ChatTitleReader.IsSpecific(TitleBox.Text)); };
+            Action updateSave = delegate { save.Enabled = preview.Text.Length>0 && (!clip.RequiresConfirmation || confirm.Checked) && (!clip.RequiresTitle || ChatTitleReader.IsSpecific(TitleBox.Text)); };
             preview.TextChanged+=delegate{countLabel.Text="原文预览 · "+preview.Text.Length+" 个字符";updateSave();};
             confirm.CheckedChanged += delegate { updateSave(); };
             TitleBox.TextChanged += delegate { updateSave(); }; updateSave();
             save.Click += delegate {
-                try { clip.Title = TitleBox.Text.Trim();if(!preview.ReadOnly)clip.Text=preview.Text; Storage.Append(output, clip, NoteBox.Text, SourceBox.Text); DialogResult = DialogResult.OK; Close(); }
+                try { clip.Title = TitleBox.Text.Trim();if(!preview.ReadOnly)clip.Text=preview.Text;
+                    foreach(var attachment in attachments){string destination=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output)),attachment.Key.Replace('/',Path.DirectorySeparatorChar));Directory.CreateDirectory(Path.GetDirectoryName(destination));if(!File.Exists(destination))File.Copy(attachment.Value,destination);}
+                    Storage.Append(output, clip, NoteBox.Text, SourceBox.Text); DialogResult = DialogResult.OK; Close(); }
                 catch (Exception error) { MessageBox.Show(this, "保存失败，原文和备注仍保留在这里。\n" + error.Message, "内容迁移", MessageBoxButtons.OK, MessageBoxIcon.Error); }
             };
             var cancel = new Button { Text = "取消", AutoSize = true, Height = 32, DialogResult = DialogResult.Cancel };
             buttons.Controls.Add(save); buttons.Controls.Add(cancel); layout.Controls.Add(buttons, 0, 8);
-            ApplyOcrResult=delegate(string text) {
-                clip.Text=text;clip.RequiresConfirmation=true;clip.Fidelity="页面框选识别；请核对字母、数字和上下标，可在预览框修正。";
-                preview.ReadOnly=false;preview.BackColor=Color.White;preview.Text=text;
-                confirm.Checked=false;confirm.Visible=true;sourceInfo.Text=clip.Fidelity;sourceInfo.ForeColor=Color.FromArgb(161,78,14);updateSave();
-            };
-            RunOcrWorkflow=async delegate(Func<Rectangle?> pickRegion,Func<Rectangle,Task<string>> readRegion) {
-                if(recognizing || IsDisposed)return;
-                double originalOpacity=Opacity;bool originalTopMost=TopMost;
-                recognizing=true;recognize.Enabled=false;cancel.Enabled=false;updateSave();
-                try {
-                    // Hide() completes a modal ShowDialog loop. Keep the editor alive and visible
-                    // to WinForms while making it transparent for the explicit region selection.
-                    Opacity=0;TopMost=false;
-                    if(sourceWindow!=IntPtr.Zero) {
-                        uint unused;uint other=Native.GetWindowThreadProcessId(Native.GetForegroundWindow(),out unused),own=Native.GetCurrentThreadId();
-                        bool attached=other!=0 && other!=own && Native.AttachThreadInput(own,other,true);
-                        try{Native.SetForegroundWindow(sourceWindow);}finally{if(attached)Native.AttachThreadInput(own,other,false);}
-                    }
-                    Rectangle? region=pickRegion();if(!region.HasValue)return;
-                    recognize.Text="正在本机识别…";
-                    string text=await readRegion(region.Value);if(IsDisposed)return;
-                    ApplyOcrResult(text);
-                }catch(Exception ex){if(!IsDisposed){Opacity=originalOpacity;TopMost=originalTopMost;MessageBox.Show(this,"识别未完成，原文和备注保留。\n"+ex.Message,"内容迁移",MessageBoxButtons.OK,MessageBoxIcon.Information);}}
-                finally{
-                    if(!IsDisposed){Opacity=originalOpacity;TopMost=originalTopMost;recognizing=false;recognize.Enabled=true;cancel.Enabled=true;recognize.Text="乱码？从原文框选识别";updateSave();inputReady=false;FocusInitialInput();}
-                }
-            };
-            recognize.Click+=async delegate {await RunOcrWorkflow(delegate{
-                using(var selector=new RegionSelector()){return selector.ShowDialog(this)==DialogResult.OK ? (Rectangle?)selector.SelectedRegion : null;}
-            },async delegate(Rectangle region){
-                string temporary=Path.Combine(Path.GetTempPath(),"ContentMover-OCR-"+Guid.NewGuid().ToString("N")+".png");
-                try{await Task.Delay(200);using(var image=LocalOcr.CaptureRegion(region))image.Save(temporary,System.Drawing.Imaging.ImageFormat.Png);Opacity=1;TopMost=true;return await LocalOcr.Read(temporary);}
-                finally{try{File.Delete(temporary);}catch{}}
-            });};
             layout.Controls.Add(new Label { Text = "追加到：" + output, Dock = DockStyle.Fill, AutoEllipsis = true, ForeColor = Color.DimGray }, 0, 9);
             // Move existing rows down; preserve their height definitions and flexible preview rows.
             var originalControls = new List<Control>(); foreach (Control control in layout.Controls) originalControls.Add(control);
@@ -534,7 +527,14 @@ namespace ContentMover {
             Controls.Add(layout); CancelButton = cancel; KeyPreview = true;
             KeyDown += delegate(object sender, KeyEventArgs e) { if (e.Control && e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; save.PerformClick(); } };
             Shown += delegate { FocusInitialInput();if(!inputReady)focusRetry.Start(); };
-            FormClosing+=delegate(object sender,FormClosingEventArgs e){if(recognizing)e.Cancel=true;};
+            if(metadata!=null){string initialTitle=TitleBox.Text,initialSource=SourceBox.Text;
+                Shown+=async delegate{try{if(await Task.WhenAny(metadata,Task.Delay(1800))!=metadata)return;var information=await metadata;
+                    if(IsDisposed || !Visible || DialogResult!=DialogResult.None)return;
+                    if(SourceBox.Text==initialSource)SourceBox.Text=information.Source;
+                    if(TitleBox.Text==initialTitle && !information.RequiresTitle){TitleBox.Text=information.Title;clip.RequiresTitle=false;titleLabel.Text="标题（可修改，便于以后回溯）";titleLabel.ForeColor=ForeColor;}
+                    clip.Detail=information.Detail;updateSave();
+                }catch{}};
+            }
             focusRetry.Tick+=delegate{FocusInitialInput();if(inputReady || ++focusAttempts>=3)focusRetry.Stop();};
             FormClosed+=delegate{focusRetry.Dispose();};
         }
@@ -650,7 +650,7 @@ namespace ContentMover {
                 if(!TestMode && !result.HasSelection && generation==selectionGeneration && !shuttingDown && !busy) {
                     await Task.Delay(100);
                     if(generation!=selectionGeneration || shuttingDown || busy)return;
-                    selection=SelectionReader.Start(hwnd,point,probeCancellation.Token);selectionTask=selection;
+                    selection=SelectionReader.Start(hwnd,point,probeCancellation.Token,true);selectionTask=selection;
                     result=await selection;
                 }
                 if(!result.HasSelection || generation!=selectionGeneration || busy || shuttingDown || !settings.RightClickEnabled)return;
@@ -682,7 +682,12 @@ namespace ContentMover {
                 Task<SelectionResult> selection = dismissMenu && selectionWindow == hwnd && selectionTask != null
                     ? selectionTask : SelectionReader.Start(hwnd, null);
                 accessibilityFallback=(await selection).Text;
-                selectionTask = null;
+            selectionTask = null;
+                if(!String.IsNullOrEmpty(accessibilityFallback)) {
+                    clip.Text=accessibilityFallback;clip.Fidelity="应用提供的选区文本";
+                    if(dismissMenu)Native.PostMessage(hwnd,0x1F,IntPtr.Zero,IntPtr.Zero);
+                    busy=false;EditClip(clip,hwnd,StartMetadata(hwnd,pid,clip));return;
+                }
                 try { if (Clipboard.ContainsText(TextDataFormat.UnicodeText)) clipboardFallback = Clipboard.GetText(TextDataFormat.UnicodeText); } catch (ExternalException) { }
                 try {
                     // Materialize all clipboard formats while their owner is still available.
@@ -696,12 +701,12 @@ namespace ContentMover {
                 // Accessibility text is only evidence of selection: PDF providers can return
                 // substituted glyphs. Always request the application's fresh copy as the original.
                 if (!Native.ActivateSource(hwnd)) throw new InvalidOperationException("无法切回来源窗口，请重新选中文字后按 Ctrl+Alt+M。");
-                if (dismissMenu) { Native.Keys(0x1B); await Task.Delay(130); }
+                if (dismissMenu) { Native.PostMessage(hwnd,0x1F,IntPtr.Zero,IntPtr.Zero); await Task.Delay(30); }
                 if (Native.GetForegroundWindow() != hwnd) throw new InvalidOperationException("来源窗口已经改变，请重新选中文字。");
                 uint before = Native.GetClipboardSequenceNumber();
                 if (!Native.Keys(0x11, 0x43)) throw new InvalidOperationException("该应用可能以管理员权限运行，普通权限工具不能向它发送复制操作。");
-                for (int i = 0; i < 30; i++) {
-                    await Task.Delay(60);
+                for (int i = 0; i < 12; i++) {
+                    await Task.Delay(25);
                     if (Native.GetClipboardSequenceNumber() == before) continue;
                     try {
                         sequenceAfterCopy = Native.GetClipboardSequenceNumber();
@@ -726,13 +731,13 @@ namespace ContentMover {
                 }
             }
             try {
-                // UI Automation or Office can block; give metadata its own STA worker and a deadline.
-                var metadata = new TaskCompletionSource<Clip>();
-                var worker = new Thread(delegate() { try { metadata.TrySetResult(ReadSource(hwnd, pid, clip)); } catch { metadata.TrySetResult(clip); } });
-                worker.IsBackground = true; worker.SetApartmentState(ApartmentState.STA); worker.Start();
-                if (await Task.WhenAny(metadata.Task, Task.Delay(1800)) == metadata.Task) clip = await metadata.Task;
-                busy = false; EditClip(clip,hwnd);
+                busy = false; EditClip(clip,hwnd,StartMetadata(hwnd,pid,clip));
             } catch (Exception ex) { busy = false; Error(ex.Message); }
+        }
+        static Task<Clip> StartMetadata(IntPtr hwnd,uint pid,Clip clip) {
+            var metadata=new TaskCompletionSource<Clip>();
+            var worker=new Thread(delegate(){try{metadata.TrySetResult(ReadSource(hwnd,pid,clip));}catch{metadata.TrySetResult(clip);}});
+            worker.IsBackground=true;worker.SetApartmentState(ApartmentState.STA);worker.Start();return metadata.Task;
         }
         static Clip ReadSource(IntPtr hwnd, uint pid, Clip clip) {
             // Build a separate result so a timed-out worker cannot mutate a displayed clip.
@@ -778,14 +783,14 @@ namespace ContentMover {
             }
             return result;
         }
-        void EditClip(Clip clip,IntPtr sourceWindow) {
+        void EditClip(Clip clip,IntPtr sourceWindow,Task<Clip> metadata=null) {
             floating.Hide();
             if (busy) { Error("已有一条摘录正在处理，请完成或取消后再试。"); return; }
             if (String.IsNullOrEmpty(clip.Text)) { Error("没有选中文字，未保存任何内容。"); return; }
             if (TestMode) { if (TestCaptured != null) TestCaptured(clip); return; }
             busy = true;
-            try { EnsureOutput(); using (var editor = new NoteDialog(clip, settings.OutputPath,sourceWindow)) {
-                if (editor.ShowDialog() == DialogResult.OK) Notify("已保存到内容迁移 TXT", "原文、来源和备注已追加。点击此通知可打开文件。");
+            try { EnsureOutput(); using (var editor = new NoteDialog(clip, settings.OutputPath,sourceWindow,metadata)) {
+                if (editor.ShowDialog() == DialogResult.OK) Notify("已保存到内容迁移 Markdown", "原文、来源和备注已追加。点击可用 VS Code 打开文件。");
             } } finally { busy = false; }
         }
         void EnsureOutput() {
@@ -796,13 +801,16 @@ namespace ContentMover {
             if(changed)SaveSettings();
         }
         void ChangeOutput() {
-            using (var dialog = new SaveFileDialog { Title = "选择内容迁移保存文件（追加，不覆盖）", Filter = "文本文件 (*.txt)|*.txt", FileName = settings.OutputPath, OverwritePrompt = false }) {
+            using (var dialog = new SaveFileDialog { Title = "选择 Markdown 保存文件（追加，不覆盖）", Filter = "Markdown 文件 (*.md)|*.md",DefaultExt="md",AddExtension=true, FileName = settings.OutputPath, OverwritePrompt = false }) {
                 if (dialog.ShowDialog() == DialogResult.OK) { string old = settings.OutputPath;bool oldCustom=settings.CustomOutput; settings.OutputPath = dialog.FileName;settings.CustomOutput=true;
                     try { EnsureOutput(); SaveSettings(); Notify("保存位置已更改", settings.OutputPath); } catch (Exception ex) { settings.OutputPath = old;settings.CustomOutput=oldCustom; Error(ex.Message); }
                 }
             }
         }
-        void OpenFile() { try { EnsureOutput(); Process.Start(settings.OutputPath); } catch (Exception ex) { Error(ex.Message); } }
+        void OpenFile() { try { EnsureOutput();string code=null;
+            foreach(string candidate in new[]{Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","Microsoft VS Code","Code.exe"),Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"Microsoft VS Code","Code.exe"),Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),"Microsoft VS Code","Code.exe")})if(File.Exists(candidate)){code=candidate;break;}
+            if(code!=null)Process.Start(new ProcessStartInfo(code,"\""+settings.OutputPath+"\""){UseShellExecute=true});else Process.Start(settings.OutputPath);
+        } catch (Exception ex) { Error(ex.Message); } }
         void Error(string message) { if (TestMode) { if (TestError != null) TestError(message); } else MessageBox.Show(message, "内容迁移", MessageBoxButtons.OK, MessageBoxIcon.Information); }
         void Notify(string title, string message) { if (!TestMode) { tray.BalloonTipTitle = title; tray.BalloonTipText = message; tray.ShowBalloonTip(4000); } }
         void SaveSettings() { File.WriteAllText(ConfigPath, new JavaScriptSerializer().Serialize(settings), new UTF8Encoding(false)); }
@@ -848,14 +856,13 @@ namespace ContentMover {
                     using(var deadline=new System.Threading.Timer(delegate{Environment.Exit(3);},null,2600,Timeout.Infinite)) {
                         Point? point=args.Length>3 ? new Point(Int32.Parse(args[2]),Int32.Parse(args[3])) : (Point?)null;
                         using(var output=new StreamWriter(Console.OpenStandardOutput(),new UTF8Encoding(false))) {
-                            output.Write(new JavaScriptSerializer().Serialize(SelectionReader.Probe(new IntPtr(Int64.Parse(args[1])),point)));
+                            output.Write(new JavaScriptSerializer().Serialize(SelectionReader.Probe(new IntPtr(Int64.Parse(args[1])),point,Array.IndexOf(args,"menu")>=0)));
                         }return;
                     }
                 }
                 if (args.Length > 0 && args[0] == "--self-test") { SelfTest(); return; }
                 if (args.Length > 0 && args[0] == "--focus-test") { FocusTest(); return; }
                 if (args.Length > 0 && args[0] == "--copy-test") { CopyTest(); return; }
-                if (args.Length > 0 && args[0] == "--ocr-test") { OcrTest(); return; }
                 if (args.Length > 0 && args[0] == "--render-test") { RenderTest(); return; }
                 if (args.Length > 0 && args[0] == "--integration-test") { IntegrationTest(); return; }
                 bool created;
@@ -883,7 +890,7 @@ namespace ContentMover {
                 using(var bitmap=new Bitmap(entry.Width,entry.Height)){entry.DrawToBitmap(bitmap,new Rectangle(Point.Empty,entry.Size));bitmap.Save(Path.Combine(TestFolder(),"floating-entry.png"));}
             }
             var clip = new Clip { Text = FixtureText, App = "示例应用", Title = "原文和备注预览", Source = "D:\\文档\\示例.docx" };
-            using (var dialog = new NoteDialog(clip, "桌面\\内容迁移.txt")) {
+            using (var dialog = new NoteDialog(clip, "桌面\\内容迁移.md")) {
                 dialog.NoteBox.Text = "这段内容解释了关键概念，准备在后续研究中引用。";
                 dialog.Show(); Application.DoEvents();
                 using (var bitmap = new Bitmap(dialog.Width, dialog.Height)) {
@@ -893,7 +900,7 @@ namespace ContentMover {
                 dialog.Close();
             }
             CapturePolicy.UseClipboardFallback(clip, FixtureText); clip.App = "ChatGPT"; clip.RequiresTitle=true;
-            using (var dialog = new NoteDialog(clip, "桌面\\内容迁移.txt")) {
+            using (var dialog = new NoteDialog(clip, "桌面\\内容迁移.md")) {
                 dialog.Show(); Application.DoEvents();
                 using (var bitmap = new Bitmap(dialog.Width, dialog.Height)) {
                     dialog.DrawToBitmap(bitmap, new Rectangle(Point.Empty, dialog.Size));
@@ -903,35 +910,23 @@ namespace ContentMover {
             }
         }
         static void Assert(bool condition, string message) { if (!condition) throw new Exception("TEST FAILED: " + message); }
-        static void OcrTest() {
-            string imagePath=Path.Combine(TestFolder(),"ocr-fixture.png"),savedPath=Path.Combine(TestFolder(),"ocr-storage-"+Guid.NewGuid().ToString("N")+".txt");
-            using(var image=new Bitmap(1100,120))using(var graphics=Graphics.FromImage(image))using(var font=new Font("Microsoft YaHei",25)) {
-                graphics.Clear(Color.White);graphics.DrawString("其主要由 3 个两电平 VSC 组成的 FID",font,Brushes.Black,10,20);image.Save(imagePath);
-            }
-            string recognized=LocalOcr.Read(imagePath).GetAwaiter().GetResult();Assert(recognized.Contains("VSC") && recognized.Contains("FID"),"本机OCR识别论文中的拉丁字母");
-            using(var editor=new NoteDialog(new Clip{Text="复制产生的乱码",Title="论文",App="测试"},savedPath)) {
-                editor.Show();Application.DoEvents();editor.NoteBox.Text="备注保留";editor.ApplyOcrResult(recognized);
-                Assert(!editor.SaveButton.Enabled && !editor.PreviewBox.ReadOnly,"识别结果需核对且可修正");
-                editor.PreviewBox.Text="其主要由 3 个两电平 VSC 组成的 FID";
-                editor.ConfirmationBox.Checked=true;Assert(editor.SaveButton.Enabled,"核对后允许保存");editor.SaveButton.PerformClick();
-                string saved=File.ReadAllText(savedPath);Assert(saved.Contains("其主要由 3 个两电平 VSC 组成的 FID") && saved.Contains("备注保留") && !saved.Contains("复制产生的乱码"),"修正后的识别原文与备注保存正确");
-            }
-            File.WriteAllText(Path.Combine(TestFolder(),"ocr-test.txt"),"PASS: Windows local OCR VSC/FID; editable preview; confirmation required; corrected text and notes stored.");
-        }
         static void CopyTest() {
             Process fixture=null;IDataObject original=Clipboard.GetDataObject();
+            var captureTime=new Stopwatch();
             using(var controller=new Controller(new Settings(),true))using(var start=new System.Windows.Forms.Timer{Interval=200})using(var deadline=new System.Windows.Forms.Timer{Interval=12000}) {
                 Action<string> fail=delegate(string message){File.WriteAllText(Path.Combine(TestFolder(),"copy-test.txt"),"FAIL: "+message);Environment.ExitCode=1;controller.Stop();};
                 controller.TestError=fail;
                 controller.TestCaptured=delegate(Clip clip){
                     try {
                         if(clip.Text!=FixtureText)File.WriteAllText(Path.Combine(TestFolder(),"copy-debug.txt"),clip.Fidelity+"\n"+Convert.ToBase64String(Encoding.UTF8.GetBytes(clip.Text)));
-                        Assert(clip.Text==FixtureText,"实际复制文本替换损坏的辅助功能选区");
-                        Assert(!clip.RequiresConfirmation && clip.Fidelity=="应用复制提供的纯文本","确认使用本次应用复制结果");
+                        Assert(clip.Text==FixtureText,"缓存选区直接保留原文");
+                        Assert(!clip.RequiresConfirmation && clip.Fidelity=="应用提供的选区文本","确认直接使用缓存选区");
                         Assert(Clipboard.GetText()=="测试前的剪贴板内容","复制后恢复之前的剪贴板");
+                        Assert(!Native.IsIconic(fixture.MainWindowHandle) && Native.IsZoomed(fixture.MainWindowHandle),"迁移不最小化或还原来源窗口");
+                        Assert(captureTime.ElapsedMilliseconds<500,"缓存选区没有等待复制或出处");
                         string path=Path.Combine(TestFolder(),"copy-fidelity.txt");Storage.Append(path,clip,"验证复制优先","测试窗口");
                         Assert(File.ReadAllText(path).Contains(FixtureText),"保存原样保留复制文本");
-                        File.WriteAllText(Path.Combine(TestFolder(),"copy-test.txt"),"PASS: real Ctrl+C overrides corrupted accessibility text; Unicode/whitespace preserved; clipboard restored; stored text matches copy.");
+                        File.WriteAllText(Path.Combine(TestFolder(),"copy-test.txt"),"PASS: cached capture "+captureTime.ElapsedMilliseconds+"ms; source stays maximized; Unicode/whitespace preserved; clipboard unchanged; stored text matches selection.");
                         controller.Stop();
                     }catch(Exception ex){fail(ex.Message);}
                 };
@@ -940,12 +935,13 @@ namespace ContentMover {
                     try {
                         fixture=Process.Start(new ProcessStartInfo(Application.ExecutablePath,"--fixture"){UseShellExecute=false,WindowStyle=ProcessWindowStyle.Normal});
                         await Task.Delay(600);fixture.Refresh();IntPtr source=fixture.MainWindowHandle;Assert(source!=IntPtr.Zero,"复制测试窗口启动");
+                        Native.ShowWindow(source,3);
                         uint unusedPid;uint other=Native.GetWindowThreadProcessId(Native.GetForegroundWindow(),out unusedPid),own=Native.GetCurrentThreadId();
                         bool attached=other!=own && Native.AttachThreadInput(own,other,true);
                         try{Native.ActivateSource(source);}finally{if(attached)Native.AttachThreadInput(own,other,false);}
                         await Task.Delay(100);Assert(Native.GetForegroundWindow()==source,"仅向测试来源窗口发送复制");
                         Native.Keys(0x11,0x41);await Task.Delay(80);Clipboard.SetText("测试前的剪贴板内容");
-                        controller.SetSelectionForCopyTest(source,"两电平TP7组成的DQR&个低压");controller.CaptureSelection(source,true);
+                        controller.SetSelectionForCopyTest(source,FixtureText);captureTime.Start();controller.CaptureSelection(source,true);
                     }catch(Exception ex){fail(ex.Message);}
                 };
                 deadline.Tick+=delegate{fail("复制测试超时");};
@@ -968,6 +964,7 @@ namespace ContentMover {
                     using(var editor=new NoteDialog(new Clip{Text="测试原文",RequiresTitle=title},Path.Combine(TestFolder(),"focus-output.txt"))) {
                         editor.Show();var clock=Stopwatch.StartNew();while(clock.ElapsedMilliseconds<400){Application.DoEvents();Thread.Sleep(10);}
                         TextBox target=title ? editor.TitleBox : editor.NoteBox;
+                        target.ImeMode=ImeMode.Disable;
                         Assert(Native.GetForegroundWindow()==editor.Handle,"弹窗取得前台键盘所有权");
                         var info=new Native.GUIINFO{size=(uint)Marshal.SizeOf(typeof(Native.GUIINFO))};Native.GetGUIThreadInfo(Native.GetCurrentThreadId(),ref info);
                         Assert(info.focus==target.Handle,"系统焦点位于正确的输入框");
@@ -984,9 +981,9 @@ namespace ContentMover {
             string folder = TestFolder(), path = Path.Combine(folder, "storage-" + Guid.NewGuid().ToString("N") + ".txt");
             string outputTest=Path.Combine(folder,"dated-output-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(outputTest);
             string legacy=Path.Combine(outputTest,"内容迁移.txt"),today=OutputFiles.DatedPath(outputTest,new DateTime(2026,10,4));
-            Assert(Path.GetFileName(today)=="内容迁移2026-10-4.txt","日期文件名有效且不含斜杠");
+            Assert(Path.GetFileName(today)=="内容迁移2026-10-4.md","日期文件名有效且不含斜杠");
             Assert(OutputFiles.Resolve(legacy,false,outputTest,new DateTime(2026,10,4))==today,"缺失默认文件时使用当天日期");
-            File.WriteAllText(legacy,"保留旧摘录");Assert(OutputFiles.Resolve(legacy,false,outputTest,new DateTime(2026,10,4))==legacy,"已有摘录文件保持原路径");
+            File.WriteAllText(legacy,"保留旧摘录");Assert(OutputFiles.Resolve(legacy,false,outputTest,new DateTime(2026,10,4))==today && File.ReadAllText(legacy)=="保留旧摘录","改用 Markdown 并保留已有 TXT");
             Assert(OutputFiles.Resolve(today,true,outputTest,new DateTime(2026,10,5))==today,"自定义保存文件不改名");
             Assert(OutputFiles.Resolve(today,false,outputTest,new DateTime(2026,10,5))==OutputFiles.DatedPath(outputTest,new DateTime(2026,10,5)),"缺失带日期默认文件时采用新的创建日期");
             var clip = new Clip { Text = FixtureText, App = "测试", Title = "选区测试", Source = "D:\\文档\\原文.docx" };
@@ -997,25 +994,18 @@ namespace ContentMover {
             Assert(File.ReadAllText(path) == first + Storage.Format(clip, "", ""), "追加不覆盖");
             Assert(File.ReadAllText(path).Contains(FixtureText), "中文、空格、换行、制表符、表情原样保留");
             Assert(!first.Contains("文本来源："), "TXT 不再显示文本来源元信息");
-            foreach(bool cancelSelection in new[]{false,true}) {
-                string modalPath=Path.Combine(folder,"modal-ocr-"+Guid.NewGuid().ToString("N")+".txt");
-                using(var editor=new NoteDialog(new Clip{Text="原来的预览",Title="论文标题",Source="论文路径"},modalPath)) {
-                    bool completed=false;Exception failure=null;editor.NoteBox.Text="识别前的备注";
-                    editor.Shown+=async delegate {
-                        try {
-                            await editor.RunOcrWorkflow(delegate{
-                                Assert(editor.Visible && !editor.IsDisposed && editor.Opacity==0,"框选时保留模态弹窗生命周期");
-                                return cancelSelection ? (Rectangle?)null : new Rectangle(50,50,200,80);
-                            },async delegate(Rectangle region){await Task.Delay(80);Assert(!editor.IsDisposed && editor.Visible,"识别等待期间弹窗不被释放");return "识别后的 VSC 和 FID";});
-                            Assert(editor.Visible && editor.Opacity==1 && editor.NoteBox.Text=="识别前的备注","识别或取消后恢复弹窗与备注");
-                            if(cancelSelection){Assert(editor.PreviewBox.Text=="原来的预览","取消框选保留原文");completed=true;editor.Close();}
-                            else{Assert(editor.PreviewBox.Text=="识别后的 VSC 和 FID" && !editor.SaveButton.Enabled,"识别结果要求核对");editor.ConfirmationBox.Checked=true;completed=true;editor.SaveButton.PerformClick();}
-                        }catch(Exception ex){failure=ex;editor.Close();}
-                    };
-                    editor.ShowDialog();if(failure!=null)throw failure;
-                    Assert(completed,"模态弹窗不会在框选中途提前退出");
-                    if(!cancelSelection)Assert(File.ReadAllText(modalPath).Contains("识别后的 VSC 和 FID") && File.ReadAllText(modalPath).Contains("识别前的备注"),"框选识别回到原弹窗并正确保存");
-                }
+            string markdownPath=Path.Combine(outputTest,"markdown.md");
+            clip.Text=FixtureText+"\r\n**加粗**\r\n![图片](assets/test.png)";
+            Storage.Append(markdownPath,clip,"# 手写备注\n**重要**",clip.Source);
+            string markdown=File.ReadAllText(markdownPath);
+            Assert(markdown.Contains(clip.Text) && markdown.Contains("### 原文") && markdown.Contains("# 手写备注"),"Markdown 原文与格式语法原样保留");
+            Assert(OutputFiles.Resolve(legacy,true,outputTest,DateTime.Today)==Path.ChangeExtension(legacy,".md"),"自定义 TXT 路径切换为 MD");
+            var pending=new TaskCompletionSource<Clip>();
+            using(var editor=new NoteDialog(new Clip{Text=FixtureText,Title="初始标题"},markdownPath,IntPtr.Zero,pending.Task)){
+                editor.Show();Application.DoEvents();Assert(editor.Visible && !pending.Task.IsCompleted,"出处未完成时立即显示备注窗口");
+                editor.TitleBox.Text="用户标题";editor.SourceBox.Text="用户出处";editor.NoteBox.Text="正在输入";
+                pending.SetResult(new Clip{Title="自动标题",Source="自动出处"});Application.DoEvents();
+                Assert(editor.TitleBox.Text=="用户标题" && editor.SourceBox.Text=="用户出处" && editor.NoteBox.Text=="正在输入","后台出处不覆盖用户输入");editor.Close();
             }
             var screen=new Rectangle(0,0,1920,1080);var button=new Size(92,30);
             var upwards=new Rectangle(742,344,890,534);Point location=FloatingButton.Placement(new Point(742,870),button,screen,upwards,8);
@@ -1048,11 +1038,12 @@ namespace ContentMover {
                 fixture.Close();
             }
             using(var entry=new Controller(new Settings(),true)) {
+                SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
                 entry.TestEntry("");Assert(!entry.ButtonVisible,"无选区时不显示右键入口");
                 entry.TestEntry("选中文字");Assert(entry.ButtonVisible,"非空选区时显示右键入口");
                 var delayed=new TaskCompletionSource<SelectionResult>();entry.TestDelayedEntry(delayed.Task);
                 var wait=Stopwatch.StartNew();while(wait.ElapsedMilliseconds<1150){Application.DoEvents();Thread.Sleep(10);}
-                delayed.SetResult(new SelectionResult{Text="缓慢应用的选区",HasSelection=true});Application.DoEvents();
+                delayed.SetResult(new SelectionResult{Text="缓慢应用的选区",HasSelection=true});wait.Restart();while(wait.ElapsedMilliseconds<300){Application.DoEvents();Thread.Sleep(10);}
                 Assert(entry.ButtonVisible,"超过旧版900ms截止时间的选区仍显示入口");
                 var obsolete=new TaskCompletionSource<SelectionResult>();entry.TestDelayedEntry(obsolete.Task);entry.TestInvalidateEntry();
                 obsolete.SetResult(new SelectionResult{Text="过期选区",HasSelection=true});Application.DoEvents();
@@ -1090,7 +1081,7 @@ namespace ContentMover {
                 editor.Show(); Application.DoEvents(); editor.SaveButton.PerformClick();
                 Assert(File.Exists(fallbackFile) && File.ReadAllText(fallbackFile).Contains(FixtureText), "兼容模式保存完整原文");
             }
-            File.WriteAllText(Path.Combine(folder, "self-test.txt"), "PASS: UTF-8 fidelity; append; multiline notes; clipboard fallback; confirmation blocks writes; confirmed save; startup enable/disable.\r\n", Encoding.UTF8);
+            File.WriteAllText(Path.Combine(folder, "self-test.txt"), "PASS: Markdown and UTF-8 fidelity; TXT preserved; append; background metadata does not overwrite edits; selection hook; confirmation; startup.\r\n", Encoding.UTF8);
         }
         static void Fixture() {
             var form = new Form { Text = "内容迁移测试选区", Size = new Size(620, 330), StartPosition = FormStartPosition.CenterScreen, TopMost = true };
@@ -1118,7 +1109,7 @@ namespace ContentMover {
                             using (var bitmap = new Bitmap(dialog.Width, dialog.Height)) { dialog.DrawToBitmap(bitmap, new Rectangle(Point.Empty, dialog.Size)); bitmap.Save(Path.Combine(folder, "note-dialog.png")); }
                             dialog.Close();
                         }
-                        File.WriteAllText(Path.Combine(folder, "integration-test.txt"), "PASS: real right-click hook; floating entry; Ctrl+C fresh selection; exact Unicode/whitespace; clipboard restoration; source title; note dialog rendered.\r\n", Encoding.UTF8);
+                        File.WriteAllText(Path.Combine(folder, "integration-test.txt"), "PASS: real right-click hook; floating entry; cached selection; exact Unicode/whitespace; clipboard unchanged; note dialog rendered.\r\n", Encoding.UTF8);
                     } catch (Exception ex) { File.WriteAllText(Path.Combine(folder, "integration-test.txt"), "FAIL: " + ex.Message); Environment.ExitCode = 1; }
                     completed = true; controller.Stop();
                 };
