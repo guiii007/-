@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.2.3.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.5.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -45,7 +45,7 @@ namespace ContentMover {
                     using(var worker=Process.Start(info)) {
                         var output=worker.StandardOutput.ReadToEndAsync();
                         using(cancellation.Register(delegate {try{if(!worker.HasExited)worker.Kill();}catch{}})) {
-                            if(!worker.WaitForExit(2200)){try{worker.Kill();}catch{}worker.WaitForExit();return new SelectionResult();}
+                            if(!worker.WaitForExit(2200)){try{worker.Kill();}catch{}worker.WaitForExit();return new SelectionResult{MenuDiagnostics="worker timeout"};}
                             if(cancellation.IsCancellationRequested || worker.ExitCode!=0)return new SelectionResult();
                             try{return new JavaScriptSerializer().Deserialize<SelectionResult>(output.GetAwaiter().GetResult()) ?? new SelectionResult();}catch{return new SelectionResult();}
                         }
@@ -98,12 +98,13 @@ namespace ContentMover {
         public static SelectionResult Probe(IntPtr hwnd,Point? point,bool menuOnly=false) {
             var result=new SelectionResult();
             if(!menuOnly)try {result.Text=Read(hwnd,point);if(result.Text.Length>0){result.HasSelection=true;return result;}}catch{}
-            Rectangle? menu;result.HasSelection=ContextCopyEnabled(hwnd,point,out menu);
+            Rectangle? menu;string diagnostics;result.HasSelection=ContextCopyEnabled(hwnd,point,out menu,out diagnostics);result.MenuDiagnostics=diagnostics;
             if(menu.HasValue){result.MenuLeft=menu.Value.Left;result.MenuTop=menu.Value.Top;result.MenuWidth=menu.Value.Width;result.MenuHeight=menu.Value.Height;}
             return result;
         }
-        static bool ContextCopyEnabled(IntPtr hwnd,Point? point,out Rectangle? menuBounds) {
+        static bool ContextCopyEnabled(IntPtr hwnd,Point? point,out Rectangle? menuBounds,out string diagnostics) {
             menuBounds=null;
+            diagnostics="";
             uint pid=Native.Pid(hwnd);if(pid==0)return false;
             string app="";try{app=Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();}catch{return false;}
             if(app=="explorer")return false;
@@ -111,17 +112,23 @@ namespace ContentMover {
                 app=="notepad" || app.Contains("deepseek") || app.Contains("chatgpt") || app.Contains("codex");
             if(!textApp)return false;
             try {
-                var roots=new List<AutomationElement>{AutomationElement.FromHandle(hwnd)};
+                var roots=new List<AutomationElement>();
+                var sourceRoot=AutomationElement.FromHandle(hwnd);
+                var localMenus=sourceRoot.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Menu));
+                diagnostics="source menus="+localMenus.Count;
+                foreach(AutomationElement localMenu in localMenus)if(!localMenu.Current.IsOffscreen)roots.Add(localMenu);
                 Rectangle? popupBounds=point.HasValue ? Native.ContextMenuBounds(hwnd,point.Value) : (Rectangle?)null;
                 if(popupBounds.HasValue){var bounds=popupBounds.Value;var hit=AutomationElement.FromPoint(new System.Windows.Point(bounds.Left+10,bounds.Top+10));
                     for(int i=0;hit!=null && i<12;i++){var rect=hit.Current.BoundingRectangle;if(rect.Width>=bounds.Width-10 && rect.Height>=bounds.Height-10){roots.Add(hit);break;}hit=TreeWalker.RawViewWalker.GetParent(hit);}}
                 var menus=AutomationElement.RootElement.FindAll(TreeScope.Children,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Menu));
+                diagnostics+="; desktop menus="+menus.Count+"; native="+popupBounds;
                 foreach(AutomationElement menu in menus)if(!menu.Current.IsOffscreen && (menu.Current.ProcessId==(int)pid || (point.HasValue && menu.Current.BoundingRectangle.Contains(new System.Windows.Point(point.Value.X,point.Value.Y)))))roots.Insert(0,menu);
                 if(point.HasValue) {
                     var hit=AutomationElement.FromPoint(new System.Windows.Point(point.Value.X+20,point.Value.Y+20));
                     for(int i=0;hit!=null && i<8;i++){if(hit.Current.ControlType==ControlType.Menu){roots.Insert(0,hit);break;}hit=TreeWalker.RawViewWalker.GetParent(hit);}
                 }
                 foreach(var root in roots) {
+                    diagnostics+="; root="+root.Current.ControlType.ProgrammaticName+"/"+root.Current.ClassName;
                     var items=root.FindAll(TreeScope.Descendants,new OrCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.MenuItem),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text)));
                     foreach(AutomationElement item in items) {
                         string name=item.Current.Name.Trim();int tab=name.IndexOf('\t');if(tab>=0)name=name.Substring(0,tab).Trim();
@@ -137,7 +144,7 @@ namespace ContentMover {
                         }
                     }
                 }
-            }catch{}
+            }catch(Exception ex){diagnostics+="; "+ex.GetType().Name;}
             return false;
         }
         static Rectangle? VisibleMenuBounds(AutomationElement menu,Rectangle? fallback){
@@ -150,7 +157,7 @@ namespace ContentMover {
             }catch{}return fallback;
         }
     }
-    public sealed class SelectionResult { public string Text=""; public bool HasSelection;public int MenuLeft,MenuTop,MenuWidth,MenuHeight;public Rectangle? MenuBounds{get{return MenuWidth>0 && MenuHeight>0 ? new Rectangle(MenuLeft,MenuTop,MenuWidth,MenuHeight) : (Rectangle?)null;}} }
+    public sealed class SelectionResult { public string Text="",MenuDiagnostics=""; public bool HasSelection;public int MenuLeft,MenuTop,MenuWidth,MenuHeight;public Rectangle? MenuBounds{get{return MenuWidth>0 && MenuHeight>0 ? new Rectangle(MenuLeft,MenuTop,MenuWidth,MenuHeight) : (Rectangle?)null;}} }
     public sealed class Settings {
         public string OutputPath = OutputFiles.DatedPath(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),DateTime.Today);
         public bool CustomOutput;
@@ -465,6 +472,7 @@ namespace ContentMover {
             return new Point(Math.Max(area.Left,Math.Min(x,area.Right-size.Width)),Math.Max(area.Top,Math.Min(y,area.Bottom-size.Height)));
         }
         public void ShowAt(Point point,Rectangle? menu=null) {
+            Hide();
             // Move the hidden window to the target monitor before measuring its DPI-dependent caption.
             Native.SetWindowPos(Handle,IntPtr.Zero,point.X,point.Y,0,0,0x1|0x4|0x10);
             MeasureCaption();
@@ -685,16 +693,15 @@ namespace ContentMover {
                 Task<SelectionResult> pendingMenu=null;
                 if(result.MenuBounds.HasValue)menu=result.MenuBounds;
                 if(!TestMode){pendingMenu=SelectionReader.Start(hwnd,point,probeCancellation.Token,true);
-                    if(await Task.WhenAny(pendingMenu,Task.Delay(180))==pendingMenu){var precise=(await pendingMenu).MenuBounds;if(precise.HasValue)menu=precise;}
+                    var menuResult=await pendingMenu;RecordMenuProbe(hwnd,point,menuResult);var precise=menuResult.MenuBounds;if(precise.HasValue)menu=precise;
                     if(generation!=selectionGeneration || shuttingDown || busy)return;
                 }
                 if(!menu.HasValue && !TestMode){await Task.Delay(80);if(generation!=selectionGeneration || shuttingDown || busy)return;menu=Native.ContextMenuBounds(hwnd,point);}
                 sourceWindow=hwnd; floating.ShowAt(point,menu); expiry.Stop(); expiry.Start();
-                if(pendingMenu!=null && !pendingMenu.IsCompleted)PlaceAfterMenu(point,pendingMenu,generation);
                 RecordEntryStatus("entry-shown",true);
             } catch { }
         }
-        async void PlaceAfterMenu(Point point,Task<SelectionResult> probe,int generation){try{var menu=(await probe).MenuBounds;if(menu.HasValue && generation==selectionGeneration && !shuttingDown && !busy && floating.Visible){floating.ShowAt(point,menu);RecordEntryStatus("entry-positioned",true);}}catch{}}
+        void RecordMenuProbe(IntPtr source,Point point,SelectionResult result){if(TestMode)return;try{File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"menu-probe.status.json"),new JavaScriptSerializer().Serialize(new{Time=DateTimeOffset.Now.ToString("o"),Source=source.ToInt64(),Point=point,Menu=result.MenuBounds,Diagnostics=result.MenuDiagnostics}));}catch{}}
         void RecordEntryStatus(string stage,bool hasSelection){if(TestMode)return;try{File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"right-click.status.json"),new JavaScriptSerializer().Serialize(new{Time=DateTimeOffset.Now.ToString("o"),Stage=stage,HasSelection=hasSelection,HookRenewals=mouseMonitor.Renewals,Window=floating.Handle.ToInt64(),Visible=Native.IsWindowVisible(floating.Handle),Left=floating.Left,Top=floating.Top,Width=floating.Width,Height=floating.Height,Desktop=Native.DesktopName(Native.GetThreadDesktop(Native.GetCurrentThreadId()))}));}catch{}}
         public Rectangle ButtonBounds { get { return floating.Bounds; } }
         public void Stop() { if(!shuttingDown){shuttingDown=true;probeCancellation.Cancel();mouseMonitor.Dispose();}Close();Dispose();Application.ExitThread(); }
@@ -889,7 +896,7 @@ namespace ContentMover {
                 if (args.Length > 0 && args[0] == "--fixture") { Fixture(); return; }
                 if (args.Length > 1 && args[0] == "--selection-probe") {
                     using(var deadline=new System.Threading.Timer(delegate{Environment.Exit(3);},null,2600,Timeout.Infinite)) {
-                        Point? point=args.Length>3 ? new Point(Int32.Parse(args[2]),Int32.Parse(args[3])) : (Point?)null;
+                        Point? point=args.Length>3 && args[2]!="none" ? new Point(Int32.Parse(args[2]),Int32.Parse(args[3])) : (Point?)null;
                         using(var output=new StreamWriter(Console.OpenStandardOutput(),new UTF8Encoding(false))) {
                             output.Write(new JavaScriptSerializer().Serialize(SelectionReader.Probe(new IntPtr(Int64.Parse(args[1])),point,Array.IndexOf(args,"menu")>=0)));
                         }return;
