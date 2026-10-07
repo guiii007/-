@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.1.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -98,9 +98,12 @@ namespace ContentMover {
         public static SelectionResult Probe(IntPtr hwnd,Point? point,bool menuOnly=false) {
             var result=new SelectionResult();
             if(!menuOnly)try {result.Text=Read(hwnd,point);if(result.Text.Length>0){result.HasSelection=true;return result;}}catch{}
-            result.HasSelection=ContextCopyEnabled(hwnd,point);return result;
+            Rectangle? menu;result.HasSelection=ContextCopyEnabled(hwnd,point,out menu);
+            if(menu.HasValue){result.MenuLeft=menu.Value.Left;result.MenuTop=menu.Value.Top;result.MenuWidth=menu.Value.Width;result.MenuHeight=menu.Value.Height;}
+            return result;
         }
-        static bool ContextCopyEnabled(IntPtr hwnd,Point? point) {
+        static bool ContextCopyEnabled(IntPtr hwnd,Point? point,out Rectangle? menuBounds) {
+            menuBounds=null;
             uint pid=Native.Pid(hwnd);if(pid==0)return false;
             string app="";try{app=Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();}catch{return false;}
             if(app=="explorer")return false;
@@ -113,10 +116,10 @@ namespace ContentMover {
                 if(popupBounds.HasValue){var bounds=popupBounds.Value;var hit=AutomationElement.FromPoint(new System.Windows.Point(bounds.Left+10,bounds.Top+10));
                     for(int i=0;hit!=null && i<12;i++){var rect=hit.Current.BoundingRectangle;if(rect.Width>=bounds.Width-10 && rect.Height>=bounds.Height-10){roots.Add(hit);break;}hit=TreeWalker.RawViewWalker.GetParent(hit);}}
                 var menus=AutomationElement.RootElement.FindAll(TreeScope.Children,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Menu));
-                foreach(AutomationElement menu in menus)if(!menu.Current.IsOffscreen && (menu.Current.ProcessId==(int)pid || (point.HasValue && menu.Current.BoundingRectangle.Contains(new System.Windows.Point(point.Value.X,point.Value.Y)))))roots.Add(menu);
+                foreach(AutomationElement menu in menus)if(!menu.Current.IsOffscreen && (menu.Current.ProcessId==(int)pid || (point.HasValue && menu.Current.BoundingRectangle.Contains(new System.Windows.Point(point.Value.X,point.Value.Y)))))roots.Insert(0,menu);
                 if(point.HasValue) {
                     var hit=AutomationElement.FromPoint(new System.Windows.Point(point.Value.X+20,point.Value.Y+20));
-                    for(int i=0;hit!=null && i<8;i++){if(hit.Current.ControlType==ControlType.Menu){roots.Add(hit);break;}hit=TreeWalker.RawViewWalker.GetParent(hit);}
+                    for(int i=0;hit!=null && i<8;i++){if(hit.Current.ControlType==ControlType.Menu){roots.Insert(0,hit);break;}hit=TreeWalker.RawViewWalker.GetParent(hit);}
                 }
                 foreach(var root in roots) {
                     var items=root.FindAll(TreeScope.Descendants,new OrCondition(new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.MenuItem),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button),new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text)));
@@ -124,9 +127,11 @@ namespace ContentMover {
                         string name=item.Current.Name.Trim();int tab=name.IndexOf('\t');if(tab>=0)name=name.Substring(0,tab).Trim();
                         bool copy=System.Text.RegularExpressions.Regex.IsMatch(name.Replace("&",""),@"^(复制|Copy)\s*(\([cC]\))?(\s+Ctrl\+C)?$",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                         if(copy && item.Current.IsEnabled && !item.Current.IsOffscreen){
-                            if(item.Current.ControlType==ControlType.MenuItem || root.Current.ControlType==ControlType.Menu)return true;
+                            var parent=item;
+                            for(int i=0;parent!=null && i<12;i++){if(parent.Current.ControlType==ControlType.Menu){var menuRect=parent.Current.BoundingRectangle;if(menuRect.Width>40 && menuRect.Height>20)menuBounds=Rectangle.FromLTRB((int)menuRect.Left,(int)menuRect.Top,(int)menuRect.Right,(int)menuRect.Bottom);return true;}if(parent==root)break;parent=TreeWalker.RawViewWalker.GetParent(parent);}
+                            if(item.Current.ControlType==ControlType.MenuItem){menuBounds=popupBounds;return true;}
                             var rect=item.Current.BoundingRectangle;
-                            if(popupBounds.HasValue && popupBounds.Value.Contains(new Point((int)(rect.Left+rect.Width/2),(int)(rect.Top+rect.Height/2))))return true;
+                            if(popupBounds.HasValue && popupBounds.Value.Contains(new Point((int)(rect.Left+rect.Width/2),(int)(rect.Top+rect.Height/2)))){menuBounds=popupBounds;return true;}
                             var ancestor=TreeWalker.ControlViewWalker.GetParent(item);
                             for(int i=0;ancestor!=null && i<8;i++){if(ancestor.Current.ControlType==ControlType.Menu)return true;if(ancestor==root)break;ancestor=TreeWalker.ControlViewWalker.GetParent(ancestor);}
                         }
@@ -136,7 +141,7 @@ namespace ContentMover {
             return false;
         }
     }
-    public sealed class SelectionResult { public string Text=""; public bool HasSelection; }
+    public sealed class SelectionResult { public string Text=""; public bool HasSelection;public int MenuLeft,MenuTop,MenuWidth,MenuHeight;public Rectangle? MenuBounds{get{return MenuWidth>0 && MenuHeight>0 ? new Rectangle(MenuLeft,MenuTop,MenuWidth,MenuHeight) : (Rectangle?)null;}} }
     public sealed class Settings {
         public string OutputPath = OutputFiles.DatedPath(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),DateTime.Today);
         public bool CustomOutput;
@@ -436,7 +441,7 @@ namespace ContentMover {
         public static Point Placement(Point point,Size size,Rectangle area,Rectangle? menu,int gap) {
             int x,y;
             if(menu.HasValue) {
-                var bounds=menu.Value;x=bounds.Left-size.Width-gap;y=Math.Max(bounds.Top,Math.Min(point.Y-size.Height/2,bounds.Bottom-size.Height));
+                var bounds=menu.Value;x=bounds.Left-size.Width-gap;y=bounds.Height<=size.Height*6 ? bounds.Top : Math.Max(bounds.Top,Math.Min(point.Y-size.Height/2,bounds.Bottom-size.Height));
                 if(x<area.Left){x=bounds.Right+gap;if(x+size.Width>area.Right){x=bounds.Left;y=bounds.Top-size.Height-gap;if(y<area.Top)y=bounds.Bottom+gap;}}
             }else{x=point.X-size.Width-gap;y=point.Y;if(x<area.Left)x=point.X+gap;}
             return new Point(Math.Max(area.Left,Math.Min(x,area.Right-size.Width)),Math.Max(area.Top,Math.Min(y,area.Bottom-size.Height)));
@@ -655,11 +660,19 @@ namespace ContentMover {
                 }
                 if(!result.HasSelection || generation!=selectionGeneration || busy || shuttingDown || !settings.RightClickEnabled)return;
                 Rectangle? menu=Native.ContextMenuBounds(hwnd,point);
+                Task<SelectionResult> pendingMenu=null;
+                if(!menu.HasValue)menu=result.MenuBounds;
+                if(!menu.HasValue && !TestMode){pendingMenu=SelectionReader.Start(hwnd,point,probeCancellation.Token,true);
+                    if(await Task.WhenAny(pendingMenu,Task.Delay(180))==pendingMenu)menu=(await pendingMenu).MenuBounds;
+                    if(generation!=selectionGeneration || shuttingDown || busy)return;
+                }
                 if(!menu.HasValue && !TestMode){await Task.Delay(80);if(generation!=selectionGeneration || shuttingDown || busy)return;menu=Native.ContextMenuBounds(hwnd,point);}
                 sourceWindow=hwnd; floating.ShowAt(point,menu); expiry.Stop(); expiry.Start();
+                if(!menu.HasValue && pendingMenu!=null)PlaceAfterMenu(point,pendingMenu,generation);
                 RecordEntryStatus("entry-shown",true);
             } catch { }
         }
+        async void PlaceAfterMenu(Point point,Task<SelectionResult> probe,int generation){try{var menu=(await probe).MenuBounds;if(menu.HasValue && generation==selectionGeneration && !shuttingDown && !busy && floating.Visible){floating.ShowAt(point,menu);RecordEntryStatus("entry-positioned",true);}}catch{}}
         void RecordEntryStatus(string stage,bool hasSelection){if(TestMode)return;try{File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"right-click.status.json"),new JavaScriptSerializer().Serialize(new{Time=DateTimeOffset.Now.ToString("o"),Stage=stage,HasSelection=hasSelection,HookRenewals=mouseMonitor.Renewals,Window=floating.Handle.ToInt64(),Visible=Native.IsWindowVisible(floating.Handle),Left=floating.Left,Top=floating.Top,Width=floating.Width,Height=floating.Height,Desktop=Native.DesktopName(Native.GetThreadDesktop(Native.GetCurrentThreadId()))}));}catch{}}
         public Rectangle ButtonBounds { get { return floating.Bounds; } }
         public void Stop() { if(!shuttingDown){shuttingDown=true;probeCancellation.Cancel();mouseMonitor.Dispose();}Close();Dispose();Application.ExitThread(); }
@@ -1008,6 +1021,8 @@ namespace ContentMover {
                 Assert(editor.TitleBox.Text=="用户标题" && editor.SourceBox.Text=="用户出处" && editor.NoteBox.Text=="正在输入","后台出处不覆盖用户输入");editor.Close();
             }
             var screen=new Rectangle(0,0,1920,1080);var button=new Size(92,30);
+            var compact=new Rectangle(1173,374,221,131);Point compactLocation=FloatingButton.Placement(new Point(1173,450),button,screen,compact,8);
+            Assert(compactLocation==new Point(1073,374) && !new Rectangle(compactLocation,button).IntersectsWith(compact),"Codex 短菜单入口放在左侧并对齐顶部");
             var upwards=new Rectangle(742,344,890,534);Point location=FloatingButton.Placement(new Point(742,870),button,screen,upwards,8);
             Assert(location==new Point(642,848),"向上展开菜单时入口贴近鼠标而非菜单顶部");
             Assert(!new Rectangle(location,button).IntersectsWith(upwards),"入口不被菜单遮挡");
