@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.2.8.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.9.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -498,7 +498,7 @@ namespace ContentMover {
     }
     sealed class ImagePasteBox : ScrollableControl {
         sealed class Attachment : IDisposable {
-            public Bitmap Image;public string Relative="assets/"+Guid.NewGuid().ToString("N")+".png";
+            public Bitmap Image;public string Filename=Guid.NewGuid().ToString("N")+".png";
             public void Dispose(){Image.Dispose();}
         }
         readonly List<Attachment> images=new List<Attachment>();
@@ -508,7 +508,8 @@ namespace ContentMover {
         public void AddImage(Image image){images.Add(new Attachment{Image=new Bitmap(image)});selected=images.Count-1;AutoScrollMinSize=new Size(images.Count*128+8,0);Invalidate();}
         public void PasteClipboard(){try{if(!Clipboard.ContainsImage())return;using(var image=Clipboard.GetImage()){if(image!=null)AddImage(image);}}catch(Exception error){MessageBox.Show(this,"暂时无法读取剪贴板图片，请重新复制后再粘贴。\n"+error.Message,"内容迁移");}}
         public void RemoveSelected(){if(selected<0 || selected>=images.Count)return;images[selected].Dispose();images.RemoveAt(selected);selected=Math.Min(selected,images.Count-1);AutoScrollMinSize=new Size(images.Count*128+8,0);Invalidate();}
-        public string SaveImages(string output){var markdown=new StringBuilder();foreach(var image in images){string destination=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output)),image.Relative.Replace('/',Path.DirectorySeparatorChar));Directory.CreateDirectory(Path.GetDirectoryName(destination));if(!File.Exists(destination))image.Image.Save(destination,System.Drawing.Imaging.ImageFormat.Png);markdown.Append("\r\n\r\n![截图](").Append(image.Relative).Append(")\r\n");}return markdown.ToString();}
+        public static string FolderName(DateTime capturedAt){return "assets"+capturedAt.ToString("yyyy-M-d",System.Globalization.CultureInfo.InvariantCulture);}
+        public string SaveImages(string output,DateTime capturedAt){var markdown=new StringBuilder();foreach(var image in images){string relative=FolderName(capturedAt)+"/"+image.Filename;string destination=Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output)),relative.Replace('/',Path.DirectorySeparatorChar));Directory.CreateDirectory(Path.GetDirectoryName(destination));if(!File.Exists(destination))image.Image.Save(destination,System.Drawing.Imaging.ImageFormat.Png);markdown.Append("\r\n\r\n![截图](").Append(relative).Append(")\r\n");}return markdown.ToString();}
         protected override bool ProcessCmdKey(ref Message message,Keys key){if(key==(Keys.Control|Keys.V)){PasteClipboard();return true;}if(key==Keys.Delete || key==Keys.Back){RemoveSelected();return true;}return base.ProcessCmdKey(ref message,key);}
         protected override void OnMouseDown(MouseEventArgs e){base.OnMouseDown(e);Focus();int index=(e.X-AutoScrollPosition.X-4)/128;if(index>=0 && index<images.Count)selected=index;Invalidate();}
         protected override void OnGotFocus(EventArgs e){base.OnGotFocus(e);Invalidate();}
@@ -574,7 +575,7 @@ namespace ContentMover {
             TitleBox.TextChanged += delegate { updateSave(); }; updateSave();
             save.Click += delegate {
                 try { clip.Title = TitleBox.Text.Trim();if(!preview.ReadOnly)clip.Text=preview.Text;
-                    string imageMarkdown=ImagesBox.SaveImages(output);
+                    string imageMarkdown=ImagesBox.SaveImages(output,clip.CapturedAt);
                     Storage.Append(output, clip, NoteBox.Text+imageMarkdown, SourceBox.Text); DialogResult = DialogResult.OK; Close(); }
                 catch (Exception error) { MessageBox.Show(this, "保存失败，原文和备注仍保留在这里。\n" + error.Message, "内容迁移", MessageBoxButtons.OK, MessageBoxIcon.Error); }
             };
@@ -1031,8 +1032,8 @@ namespace ContentMover {
         static void ImageTest() {
             var previous=Clipboard.GetDataObject();string folder=Path.Combine(TestFolder(),"images-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
             try {
-                string output=Path.Combine(folder,"摘录.md");
-                using(var editor=new NoteDialog(new Clip{Text=FixtureText,Title="截图粘贴验证"},output)) {
+                var captureDay=new DateTime(2026,10,7,15,0,0);string imageFolder=ImagePasteBox.FolderName(captureDay);string output=Path.Combine(folder,"摘录.md");
+                using(var editor=new NoteDialog(new Clip{Text=FixtureText,Title="截图粘贴验证",CapturedAt=captureDay},output)) {
                     editor.Show();Application.DoEvents();
                     using(var first=new Bitmap(640,320)){using(var graphics=Graphics.FromImage(first))graphics.Clear(Color.CornflowerBlue);Clipboard.SetImage(first);editor.ImagesBox.PasteClipboard();}
                     using(var second=new Bitmap(320,640)){using(var graphics=Graphics.FromImage(second))graphics.Clear(Color.OrangeRed);Clipboard.SetImage(second);editor.ImagesBox.PasteClipboard();}
@@ -1042,13 +1043,14 @@ namespace ContentMover {
                     using(var bitmap=new Bitmap(editor.Width,editor.Height)){editor.DrawToBitmap(bitmap,new Rectangle(Point.Empty,editor.Size));bitmap.Save(Path.Combine(TestFolder(),"image-paste-dialog.png"));}
                     editor.SaveButton.PerformClick();Assert(editor.DialogResult==DialogResult.OK,"保存图片摘录");
                 }
-                string markdown=File.ReadAllText(output);string[] images=Directory.GetFiles(Path.Combine(folder,"assets"),"*.png");Assert(images.Length==2 && markdown.Contains(FixtureText) && markdown.Contains("**两张截图**"),"多图片与原文备注一起保存");
-                int position=-1;foreach(var name in images){Assert(markdown.Contains("assets/"+Path.GetFileName(name)),"所有图片使用相对链接");}
-                string[] markers=markdown.Split(new[]{"![截图](assets/"},StringSplitOptions.None);Assert(markers.Length==3,"两个图片引用");
-                foreach(var expected in new[]{Color.CornflowerBlue,Color.OrangeRed}){position++;string name=markers[position+1].Split(')')[0];using(var bitmap=new Bitmap(Path.Combine(folder,"assets",name))){Assert(bitmap.GetPixel(0,0).ToArgb()==expected.ToArgb(),"图片颜色和顺序保持");Assert(bitmap.Width==(position==0 ? 640 : 320) && bitmap.Height==(position==0 ? 320 : 640),"图片原始尺寸保持");}}
+                string markdown=File.ReadAllText(output);string[] images=Directory.GetFiles(Path.Combine(folder,imageFolder),"*.png");Assert(images.Length==2 && markdown.Contains(FixtureText) && markdown.Contains("**两张截图**"),"多图片与原文备注一起保存");
+                int position=-1;foreach(var name in images){Assert(markdown.Contains(imageFolder+"/"+Path.GetFileName(name)),"所有图片使用相对链接");}
+                string[] markers=markdown.Split(new[]{"![截图]("+imageFolder+"/"},StringSplitOptions.None);Assert(markers.Length==3,"两个图片引用");
+                foreach(var expected in new[]{Color.CornflowerBlue,Color.OrangeRed}){position++;string name=markers[position+1].Split(')')[0];using(var bitmap=new Bitmap(Path.Combine(folder,imageFolder,name))){Assert(bitmap.GetPixel(0,0).ToArgb()==expected.ToArgb(),"图片颜色和顺序保持");Assert(bitmap.Width==(position==0 ? 640 : 320) && bitmap.Height==(position==0 ? 320 : 640),"图片原始尺寸保持");}}
                 string cancelled=Path.Combine(folder,"cancelled.md");using(var editor=new NoteDialog(new Clip{Text=FixtureText,Title="取消验证"},cancelled)){using(var bitmap=new Bitmap(10,10))editor.ImagesBox.AddImage(bitmap);editor.Close();}
-                Assert(!File.Exists(cancelled) && Directory.GetFiles(Path.Combine(folder,"assets")).Length==2,"取消不写入图片");
-                File.WriteAllText(Path.Combine(TestFolder(),"image-test.txt"),"PASS: clipboard multi-image paste; deletion; non-image ignored; PNG dimensions and pixels; Markdown relative links and order; cancellation; rendered dialog.");
+                Assert(!File.Exists(cancelled) && Directory.GetFiles(Path.Combine(folder,imageFolder)).Length==2,"取消不写入图片");
+                using(var nextImages=new ImagePasteBox()){using(var bitmap=new Bitmap(20,20))nextImages.AddImage(bitmap);var nextDay=captureDay.AddDays(1);string nextMarkdown=nextImages.SaveImages(output,nextDay);Storage.Append(output,new Clip{Text="次日截图",Title="次日",CapturedAt=nextDay},nextMarkdown,"");Assert(nextMarkdown.Contains("assets2026-10-8/") && Directory.GetFiles(Path.Combine(folder,"assets2026-10-8")).Length==1 && Directory.GetFiles(Path.Combine(folder,imageFolder)).Length==2,"跨日图片文件夹分离且旧链接保留");Assert(!Directory.Exists(Path.Combine(folder,"assets")),"新摘录不创建无日期图片文件夹");}
+                File.WriteAllText(Path.Combine(TestFolder(),"image-test.txt"),"PASS: clipboard multi-image paste; deletion; non-image ignored; PNG dimensions and pixels; Markdown relative links and order; cancellation; dated folders across days; rendered dialog.");
             }finally{if(previous!=null)Clipboard.SetDataObject(previous,true);else Clipboard.Clear();}
         }
         static void FocusTest() {
