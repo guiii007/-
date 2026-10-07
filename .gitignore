@@ -6,3 +6,4 @@ test-results/
 github-publish/
 dist/
 tools/
+*.status.json

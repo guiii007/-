@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.1.3.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.4.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -319,12 +319,19 @@ namespace ContentMover {
     sealed class MouseMonitor : IDisposable {
         readonly Thread thread;readonly Action<int,Native.MOUSE,IntPtr> receive;
         Native.HookProc callback;IntPtr hook;uint threadId;
-        public MouseMonitor(Action<int,Native.MOUSE,IntPtr> handler) {
+        int renewals;public int Renewals{get{return Volatile.Read(ref renewals);}}
+        public MouseMonitor(Action<int,Native.MOUSE,IntPtr> handler,int renewalInterval=10000) {
             receive=handler;var ready=new ManualResetEvent(false);
             thread=new Thread(delegate(){
                 threadId=Native.GetCurrentThreadId();callback=OnMouse;Native.MSG ignored;Native.PeekMessage(out ignored,IntPtr.Zero,0,0,0);
                 hook=Native.SetWindowsHookEx(Native.WH_MOUSE_LL,callback,Native.GetModuleHandle(null),0);ready.Set();
-                if(hook!=IntPtr.Zero) {Application.Run();Native.UnhookWindowsHookEx(hook);}
+                if(hook!=IntPtr.Zero)using(var refresh=new System.Windows.Forms.Timer{Interval=renewalInterval}) {
+                    refresh.Tick+=delegate{
+                        IntPtr replacement=Native.SetWindowsHookEx(Native.WH_MOUSE_LL,callback,Native.GetModuleHandle(null),0);
+                        if(replacement!=IntPtr.Zero){IntPtr previous=hook;hook=replacement;Native.UnhookWindowsHookEx(previous);Interlocked.Increment(ref renewals);}
+                    };
+                    refresh.Start();try{Application.Run();}finally{refresh.Stop();Native.UnhookWindowsHookEx(hook);}
+                }
             });thread.IsBackground=true;thread.SetApartmentState(ApartmentState.STA);thread.Start();
             if(!ready.WaitOne(2000) || hook==IntPtr.Zero)throw new InvalidOperationException("无法注册鼠标监听。");
         }
@@ -333,8 +340,9 @@ namespace ContentMover {
                 int message=wp.ToInt32();
                 if(message==0x201 || message==0x202 || message==0x204 || message==0x205) {
                     var data=(Native.MOUSE)Marshal.PtrToStructure(lp,typeof(Native.MOUSE));
-                    IntPtr window=Native.GetAncestor(Native.WindowFromPoint(data.pt),2);
-                    if(window==IntPtr.Zero)window=Native.GetForegroundWindow();
+                    // Keep the low-level callback short. Resolving controls under the pointer can
+                    // block on another application and make Windows silently remove the hook.
+                    IntPtr window=Native.GetForegroundWindow();
                     try{receive(message,data,window);}catch{}
                 }
             }
@@ -572,6 +580,7 @@ namespace ContentMover {
                     selectionTask=SelectionReader.Start(window,point,probeCancellation.Token);
                 }
             } else if(message==Native.WM_RBUTTONDOWN && settings.RightClickEnabled) {
+                RecordEntryStatus("right-click",false);
                 floating.Hide();
                 if(window==IntPtr.Zero || Native.Pid(window)==(uint)Process.GetCurrentProcess().Id){selectionGeneration++;ResetProbe();selectionWindow=IntPtr.Zero;return;}
                 if(selectionWindow!=window || DateTime.UtcNow-lastSelectionGesture>TimeSpan.FromSeconds(3)) {
@@ -599,6 +608,7 @@ namespace ContentMover {
             if(selection==null)return;
             try {
                 var result=await selection;
+                RecordEntryStatus("selection-read",result.HasSelection);
                 if(!TestMode && !result.HasSelection && generation==selectionGeneration && !shuttingDown && !busy) {
                     await Task.Delay(100);
                     if(generation!=selectionGeneration || shuttingDown || busy)return;
@@ -607,8 +617,10 @@ namespace ContentMover {
                 }
                 if(!result.HasSelection || generation!=selectionGeneration || busy || shuttingDown || !settings.RightClickEnabled)return;
                 sourceWindow=hwnd; floating.ShowAt(point); expiry.Stop(); expiry.Start();
+                RecordEntryStatus("entry-shown",true);
             } catch { }
         }
+        void RecordEntryStatus(string stage,bool hasSelection){if(TestMode)return;try{File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"right-click.status.json"),new JavaScriptSerializer().Serialize(new{Time=DateTimeOffset.Now.ToString("o"),Stage=stage,HasSelection=hasSelection,HookRenewals=mouseMonitor.Renewals}));}catch{}}
         public Rectangle ButtonBounds { get { return floating.Bounds; } }
         public void Stop() { if(!shuttingDown){shuttingDown=true;probeCancellation.Cancel();mouseMonitor.Dispose();}Close();Dispose();Application.ExitThread(); }
         public void ClickCaptureForTest() { CaptureSelection(sourceWindow, true); }
@@ -945,6 +957,10 @@ namespace ContentMover {
             Assert(File.ReadAllText(path) == first + Storage.Format(clip, "", ""), "追加不覆盖");
             Assert(File.ReadAllText(path).Contains(FixtureText), "中文、空格、换行、制表符、表情原样保留");
             Assert(!first.Contains("文本来源："), "TXT 不再显示文本来源元信息");
+            using(var monitor=new MouseMonitor(delegate{},80)) {
+                var wait=Stopwatch.StartNew();while(monitor.Renewals<2 && wait.ElapsedMilliseconds<1500){Application.DoEvents();Thread.Sleep(10);}
+                Assert(monitor.Renewals>=2,"鼠标监听定期重新注册成功");
+            }
             var pdfCopy=new Clip{Text="两电平TP7组成的DQR&个低压"};string paper="其主要由 3 个两电平 VSC 组成的 FID";
             Assert(CapturePolicy.UseFreshCopy(pdfCopy,paper) && pdfCopy.Text==paper && !pdfCopy.RequiresConfirmation,"应用复制覆盖PDF接口错误字符");
             Assert(CapturePolicy.UseAccessibilityFallback(pdfCopy,"未验证选区") && pdfCopy.RequiresConfirmation,"仅辅助功能读取时必须核对");

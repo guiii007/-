@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 [assembly: AssemblyProduct("内容迁移安装程序")]
-[assembly: AssemblyVersion("1.1.3.0")]
+[assembly: AssemblyVersion("1.1.4.0")]
 static class InstallCore {
     public const string RegistryPath=@"Software\Microsoft\Windows\CurrentVersion\Uninstall\ContentMover";
     public static readonly string DefaultPath=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","ContentMover");
@@ -61,7 +61,7 @@ static class InstallCore {
         if(startup)File.WriteAllText(StartupPath,"CreateObject(\"WScript.Shell\").Run Chr(34) & \""+app.Replace("\"","\"\"")+"\" & Chr(34), 0, False\r\n",Encoding.Unicode);
         else if(File.Exists(StartupPath))File.Delete(StartupPath);
         using(var key=Registry.CurrentUser.CreateSubKey(RegistryPath)) {
-            key.SetValue("DisplayName","内容迁移");key.SetValue("DisplayVersion","1.1.3");key.SetValue("Publisher","guiii007");key.SetValue("InstallLocation",root);
+            key.SetValue("DisplayName","内容迁移");key.SetValue("DisplayVersion","1.1.4");key.SetValue("Publisher","guiii007");key.SetValue("InstallLocation",root);
             key.SetValue("UninstallString","\""+uninstall+"\" --uninstall");key.SetValue("DisplayIcon",app+",0");key.SetValue("NoModify",1);key.SetValue("NoRepair",1);
         }
     }
