@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.2.10.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.11.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -98,9 +98,8 @@ namespace ContentMover {
         }
         public static SelectionResult Probe(IntPtr hwnd,Point? point,bool menuOnly=false) {
             var result=new SelectionResult();
-            // Shell address/name controls can retain text selections while the folder background is clicked.
-            // File Explorer and the desktop are not document text capture surfaces.
-            if(IsFileShell(hwnd))return result;
+            // In the shell, accept only the focused edit under this click, never a stale address/name selection.
+            if(IsFileShell(hwnd)){result.Text=Native.SelectedEditTextAt(hwnd,point);result.HasSelection=result.Text.Length>0;return result;}
             if(!menuOnly)try {result.Text=Read(hwnd,point);if(result.Text.Length>0){result.HasSelection=true;return result;}}catch{}
             Rectangle? menu;string diagnostics;result.HasSelection=ContextCopyEnabled(hwnd,point,out menu,out diagnostics);result.MenuDiagnostics=diagnostics;
             if(menu.HasValue){result.MenuLeft=menu.Value.Left;result.MenuTop=menu.Value.Top;result.MenuWidth=menu.Value.Width;result.MenuHeight=menu.Value.Height;}
@@ -385,6 +384,13 @@ namespace ContentMover {
                 if(SendMessageText(info.focus,0xD,new IntPtr(count+1),text,2,180,out result)==IntPtr.Zero)return "";
                 string full=text.ToString();return b<=full.Length ? full.Substring(a,b-a) : "";
             }finally{Marshal.FreeHGlobal(start);Marshal.FreeHGlobal(end);}
+        }
+        public static string SelectedEditTextAt(IntPtr hwnd,Point? point){
+            uint pid;uint thread=GetWindowThreadProcessId(hwnd,out pid);var info=new GUIINFO{size=(uint)Marshal.SizeOf(typeof(GUIINFO))};
+            if(!GetGUIThreadInfo(thread,ref info) || info.focus==IntPtr.Zero || GetAncestor(info.focus,2)!=GetAncestor(hwnd,2))return "";
+            RECT rect;if(!GetWindowRect(info.focus,out rect))return "";
+            if(point.HasValue && !Rectangle.FromLTRB(rect.Left,rect.Top,rect.Right,rect.Bottom).Contains(point.Value))return "";
+            return SelectedEditText(info.focus);
         }
         [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint key);
         [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hwnd, int id);
@@ -693,7 +699,7 @@ namespace ContentMover {
             } else if(message==Native.WM_RBUTTONDOWN && settings.RightClickEnabled) {
                 RecordEntryStatus("right-click",false);
                 floating.Hide();
-                if(window==IntPtr.Zero || Native.Pid(window)==(uint)Process.GetCurrentProcess().Id || SelectionReader.IsFileShell(window)){selectionGeneration++;ResetProbe();selectionWindow=IntPtr.Zero;return;}
+                if(window==IntPtr.Zero || Native.Pid(window)==(uint)Process.GetCurrentProcess().Id || (SelectionReader.IsFileShell(window) && Native.SelectedEditTextAt(window,point).Length==0)){selectionGeneration++;ResetProbe();selectionWindow=IntPtr.Zero;return;}
                 if(selectionWindow!=window || DateTime.UtcNow-lastSelectionGesture>TimeSpan.FromSeconds(3)) {
                     selectionGeneration++;ResetProbe();selectionWindow=window;
                     selectionTask=SelectionReader.Start(window,point,probeCancellation.Token);
@@ -1155,6 +1161,9 @@ namespace ContentMover {
             using(var fixture=new Form())using(var edit=new TextBox{Multiline=true,Text=FixtureText,Dock=DockStyle.Fill}) {
                 fixture.Controls.Add(edit);fixture.Show();edit.Focus();edit.SelectAll();Application.DoEvents();
                 Assert(Native.SelectedEditText(edit.Handle)==FixtureText,"原生编辑器选区保留Unicode和换行");
+                var editBounds=edit.RectangleToScreen(edit.ClientRectangle);
+                Assert(Native.SelectedEditTextAt(fixture.Handle,new Point(editBounds.Left+4,editBounds.Top+4))==FixtureText,"编辑框内部点击接受真实文字选区");
+                Assert(Native.SelectedEditTextAt(fixture.Handle,new Point(editBounds.Right+20,editBounds.Bottom+20))=="","点击编辑框外部不接受残留选区");
                 var probe=SelectionReader.Start(edit.Handle,null);var clock=Stopwatch.StartNew();
                 while(!probe.IsCompleted && clock.ElapsedMilliseconds<5000){Application.DoEvents();Thread.Sleep(10);}
                 Assert(probe.IsCompleted && probe.Result.Text==FixtureText,"独立读取进程取得真实编辑器选区");
