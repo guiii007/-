@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.2.9.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.10.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -31,6 +31,7 @@ namespace ContentMover {
         }
     }
     static class SelectionReader {
+        public static bool IsFileShell(IntPtr hwnd){try{var name=new StringBuilder(128);Native.GetClassName(hwnd,name,name.Capacity);string cls=name.ToString();if(cls=="CabinetWClass" || cls=="ExploreWClass" || cls=="Progman" || cls=="WorkerW")return true;return Process.GetProcessById((int)Native.Pid(hwnd)).ProcessName.Equals("explorer",StringComparison.OrdinalIgnoreCase);}catch{return false;}}
         static readonly SemaphoreSlim Workers = new SemaphoreSlim(2, 2);
         public static async Task<SelectionResult> Start(IntPtr hwnd, Point? point, CancellationToken cancellation = default(CancellationToken),bool menuOnly=false) {
             try { await Workers.WaitAsync(cancellation); } catch(OperationCanceledException) {return new SelectionResult();}
@@ -97,6 +98,9 @@ namespace ContentMover {
         }
         public static SelectionResult Probe(IntPtr hwnd,Point? point,bool menuOnly=false) {
             var result=new SelectionResult();
+            // Shell address/name controls can retain text selections while the folder background is clicked.
+            // File Explorer and the desktop are not document text capture surfaces.
+            if(IsFileShell(hwnd))return result;
             if(!menuOnly)try {result.Text=Read(hwnd,point);if(result.Text.Length>0){result.HasSelection=true;return result;}}catch{}
             Rectangle? menu;string diagnostics;result.HasSelection=ContextCopyEnabled(hwnd,point,out menu,out diagnostics);result.MenuDiagnostics=diagnostics;
             if(menu.HasValue){result.MenuLeft=menu.Value.Left;result.MenuTop=menu.Value.Top;result.MenuWidth=menu.Value.Width;result.MenuHeight=menu.Value.Height;}
@@ -689,7 +693,7 @@ namespace ContentMover {
             } else if(message==Native.WM_RBUTTONDOWN && settings.RightClickEnabled) {
                 RecordEntryStatus("right-click",false);
                 floating.Hide();
-                if(window==IntPtr.Zero || Native.Pid(window)==(uint)Process.GetCurrentProcess().Id){selectionGeneration++;ResetProbe();selectionWindow=IntPtr.Zero;return;}
+                if(window==IntPtr.Zero || Native.Pid(window)==(uint)Process.GetCurrentProcess().Id || SelectionReader.IsFileShell(window)){selectionGeneration++;ResetProbe();selectionWindow=IntPtr.Zero;return;}
                 if(selectionWindow!=window || DateTime.UtcNow-lastSelectionGesture>TimeSpan.FromSeconds(3)) {
                     selectionGeneration++;ResetProbe();selectionWindow=window;
                     selectionTask=SelectionReader.Start(window,point,probeCancellation.Token);
