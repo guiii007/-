@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.2.11.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.12.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -31,6 +31,21 @@ namespace ContentMover {
         }
     }
     static class SelectionReader {
+        public static bool IsCodeWindow(IntPtr hwnd){try{return Process.GetProcessById((int)Native.Pid(hwnd)).ProcessName.Equals("Code",StringComparison.OrdinalIgnoreCase);}catch{return false;}}
+        public static async Task<SelectionResult> ReadCodeSelection(IntPtr hwnd,Point point){
+            var result=new SelectionResult();IDataObject previous=null;uint copiedSequence=0;
+            try{
+                result.MenuDiagnostics="Code: foreground check";if(Native.GetForegroundWindow()!=hwnd)return result;
+                var root=AutomationElement.FromHandle(hwnd);var editor=root.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.AutomationIdProperty,"workbench.parts.editor"));
+                result.MenuDiagnostics="Code: editor bounds check";
+                if(editor==null || !editor.Current.BoundingRectangle.Contains(new System.Windows.Point(point.X,point.Y)) || Native.GetForegroundWindow()!=hwnd)return result;
+                var original=Clipboard.GetDataObject();if(original!=null){var snapshot=new DataObject();foreach(string format in original.GetFormats(false))try{var data=original.GetData(format,false);if(data!=null)snapshot.SetData(format,false,data);}catch{}previous=snapshot;}
+                uint before=Native.GetClipboardSequenceNumber();if(!Native.Keys(0x11,0x43))return result;
+                result.MenuDiagnostics="Code: waiting for copy";
+                for(int i=0;i<12;i++){await Task.Delay(25);if(Native.GetClipboardSequenceNumber()==before)continue;copiedSequence=Native.GetClipboardSequenceNumber();var data=Clipboard.GetDataObject();bool selected=CapturePolicy.IsCodeTextSelection(data);result.MenuDiagnostics="Code: copied; selected="+selected+"; formats="+String.Join(",",data.GetFormats(false));if(selected && Clipboard.ContainsText(TextDataFormat.UnicodeText)){result.Text=Clipboard.GetText(TextDataFormat.UnicodeText);result.HasSelection=result.Text.Length>0;}break;}
+            }catch(Exception error){result.MenuDiagnostics="Code: "+error.GetType().Name;}finally{try{if(copiedSequence!=0 && Native.GetClipboardSequenceNumber()==copiedSequence){if(previous!=null)Clipboard.SetDataObject(previous,true);else Clipboard.Clear();}}catch{}}
+            return result;
+        }
         public static bool IsFileShell(IntPtr hwnd){try{var name=new StringBuilder(128);Native.GetClassName(hwnd,name,name.Capacity);string cls=name.ToString();if(cls=="CabinetWClass" || cls=="ExploreWClass" || cls=="Progman" || cls=="WorkerW")return true;return Process.GetProcessById((int)Native.Pid(hwnd)).ProcessName.Equals("explorer",StringComparison.OrdinalIgnoreCase);}catch{return false;}}
         static readonly SemaphoreSlim Workers = new SemaphoreSlim(2, 2);
         public static async Task<SelectionResult> Start(IntPtr hwnd, Point? point, CancellationToken cancellation = default(CancellationToken),bool menuOnly=false) {
@@ -112,7 +127,7 @@ namespace ContentMover {
             string app="";try{app=Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();}catch{return false;}
             if(app=="explorer")return false;
             bool textApp=app=="msedge" || app=="chrome" || app=="firefox" || app=="brave" || app=="winword" ||
-                app=="notepad" || app.Contains("deepseek") || app.Contains("chatgpt") || app.Contains("codex");
+                app=="notepad" || app=="code" || app.Contains("deepseek") || app.Contains("chatgpt") || app.Contains("codex");
             if(!textApp)return false;
             try {
                 var roots=new List<AutomationElement>();
@@ -138,12 +153,12 @@ namespace ContentMover {
                         bool copy=System.Text.RegularExpressions.Regex.IsMatch(name.Replace("&",""),@"^(复制|Copy)\s*(\([cC]\))?(\s+Ctrl\+C)?$",System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                         if(copy && item.Current.IsEnabled && !item.Current.IsOffscreen){
                             var parent=item;
-                            for(int i=0;parent!=null && i<12;i++){if(parent.Current.ControlType==ControlType.Menu){menuBounds=VisibleMenuBounds(parent,popupBounds);return true;}if(parent==root)break;parent=TreeWalker.RawViewWalker.GetParent(parent);}
-                            if(item.Current.ControlType==ControlType.MenuItem){menuBounds=popupBounds;return true;}
+                            for(int i=0;parent!=null && i<12;i++){if(parent.Current.ControlType==ControlType.Menu){menuBounds=VisibleMenuBounds(parent,popupBounds);return app!="code";}if(parent==root)break;parent=TreeWalker.RawViewWalker.GetParent(parent);}
+                            if(item.Current.ControlType==ControlType.MenuItem){menuBounds=popupBounds;return app!="code";}
                             var rect=item.Current.BoundingRectangle;
-                            if(popupBounds.HasValue && popupBounds.Value.Contains(new Point((int)(rect.Left+rect.Width/2),(int)(rect.Top+rect.Height/2)))){menuBounds=popupBounds;return true;}
+                            if(popupBounds.HasValue && popupBounds.Value.Contains(new Point((int)(rect.Left+rect.Width/2),(int)(rect.Top+rect.Height/2)))){menuBounds=popupBounds;return app!="code";}
                             var ancestor=TreeWalker.ControlViewWalker.GetParent(item);
-                            for(int i=0;ancestor!=null && i<8;i++){if(ancestor.Current.ControlType==ControlType.Menu)return true;if(ancestor==root)break;ancestor=TreeWalker.ControlViewWalker.GetParent(ancestor);}
+                            for(int i=0;ancestor!=null && i<8;i++){if(ancestor.Current.ControlType==ControlType.Menu)return app!="code";if(ancestor==root)break;ancestor=TreeWalker.ControlViewWalker.GetParent(ancestor);}
                         }
                     }
                 }
@@ -214,6 +229,7 @@ namespace ContentMover {
         }
     }
     static class CapturePolicy {
+        public static bool IsCodeTextSelection(IDataObject data){if(data==null)return false;foreach(string format in new[]{"application/vnd.code.copyMetadata","vscode-editor-data","chromium/x-web-custom-data","Chromium Web Custom MIME Data Format"})try{var value=data.GetData(format,false);string text=value as string;var stream=value as MemoryStream;if(stream!=null){byte[] bytes=stream.ToArray();text=Encoding.Unicode.GetString(bytes)+"\n"+Encoding.UTF8.GetString(bytes);}if(text!=null && System.Text.RegularExpressions.Regex.IsMatch(text,"\"isFromEmptySelection\"\\s*:\\s*false"))return true;}catch{}return false;}
         public static bool UseFreshCopy(Clip clip,string text) {
             if(String.IsNullOrEmpty(text))return false;
             clip.Text=text;clip.RequiresConfirmation=false;clip.Fidelity="应用复制提供的纯文本";return true;
@@ -694,13 +710,13 @@ namespace ContentMover {
             } else if(message==0x202 && window==leftWindow && Native.Pid(window)!=(uint)Process.GetCurrentProcess().Id) {
                 if(Math.Abs(point.X-leftDown.X)+Math.Abs(point.Y-leftDown.Y)>4) {
                     selectionWindow=window;lastSelectionGesture=DateTime.UtcNow;
-                    selectionTask=SelectionReader.Start(window,point,probeCancellation.Token);
+                    selectionTask=SelectionReader.IsCodeWindow(window) ? SelectionReader.ReadCodeSelection(window,point) : SelectionReader.Start(window,point,probeCancellation.Token);
                 }
             } else if(message==Native.WM_RBUTTONDOWN && settings.RightClickEnabled) {
                 RecordEntryStatus("right-click",false);
                 floating.Hide();
                 if(window==IntPtr.Zero || Native.Pid(window)==(uint)Process.GetCurrentProcess().Id || (SelectionReader.IsFileShell(window) && Native.SelectedEditTextAt(window,point).Length==0)){selectionGeneration++;ResetProbe();selectionWindow=IntPtr.Zero;return;}
-                if(selectionWindow!=window || DateTime.UtcNow-lastSelectionGesture>TimeSpan.FromSeconds(3)) {
+                if(selectionWindow!=window || (DateTime.UtcNow-lastSelectionGesture>TimeSpan.FromSeconds(3) && !SelectionReader.IsCodeWindow(window))) {
                     selectionGeneration++;ResetProbe();selectionWindow=window;
                     selectionTask=SelectionReader.Start(window,point,probeCancellation.Token);
                 }
@@ -725,8 +741,10 @@ namespace ContentMover {
             if(selection==null)return;
             try {
                 var result=await selection;
+                if(!TestMode && SelectionReader.IsCodeWindow(hwnd))RecordMenuProbe(hwnd,point,result);
                 RecordEntryStatus("selection-read",result.HasSelection);
                 if(!TestMode && !result.HasSelection && generation==selectionGeneration && !shuttingDown && !busy) {
+                    if(SelectionReader.IsCodeWindow(hwnd))return; // Copy is enabled for an unselected whole line in VS Code.
                     await Task.Delay(100);
                     if(generation!=selectionGeneration || shuttingDown || busy)return;
                     selection=SelectionReader.Start(hwnd,point,probeCancellation.Token,true);selectionTask=selection;
@@ -798,17 +816,17 @@ namespace ContentMover {
                         sequenceAfterCopy = Native.GetClipboardSequenceNumber();
                         if (Clipboard.ContainsText(TextDataFormat.UnicodeText)) {
                             string fresh=Clipboard.GetText(TextDataFormat.UnicodeText);
-                            sequenceAfterCopy = Native.GetClipboardSequenceNumber(); copied = CapturePolicy.UseFreshCopy(clip,fresh);
-                            if (copied) break;
+                            sequenceAfterCopy = Native.GetClipboardSequenceNumber(); copied = (!clip.App.Equals("Code",StringComparison.OrdinalIgnoreCase) || CapturePolicy.IsCodeTextSelection(Clipboard.GetDataObject())) && CapturePolicy.UseFreshCopy(clip,fresh);
+                        if (copied) break;
                         }
                     } catch (ExternalException) { }
                 }
                 if (!copied) {
-                    if (!CapturePolicy.UseClipboardFallback(clip, clipboardFallback) && !CapturePolicy.UseAccessibilityFallback(clip,accessibilityFallback))
+                    if (clip.App.Equals("Code",StringComparison.OrdinalIgnoreCase) || (!CapturePolicy.UseClipboardFallback(clip, clipboardFallback) && !CapturePolicy.UseAccessibilityFallback(clip,accessibilityFallback)))
                         throw new InvalidOperationException("未取得本次复制文本。\n请选中文字后按 Ctrl+C，再点内容迁移并核对预览。");
                 }
             } catch (Exception ex) {
-                if (CapturePolicy.UseClipboardFallback(clip, clipboardFallback) || CapturePolicy.UseAccessibilityFallback(clip,accessibilityFallback)) { }
+                if (!clip.App.Equals("Code",StringComparison.OrdinalIgnoreCase) && (CapturePolicy.UseClipboardFallback(clip, clipboardFallback) || CapturePolicy.UseAccessibilityFallback(clip,accessibilityFallback))) { }
                 else { Error(ex.Message); busy = false; return; }
             }
             finally {
@@ -947,6 +965,7 @@ namespace ContentMover {
                     }
                 }
                 if (args.Length > 0 && args[0] == "--self-test") { SelfTest(); return; }
+                if(args.Length>0 && args[0]=="--code-clipboard-probe"){var data=Clipboard.GetDataObject();using(var output=new StreamWriter(Console.OpenStandardOutput(),new UTF8Encoding(false)))output.Write(new JavaScriptSerializer().Serialize(new{HasSelection=CapturePolicy.IsCodeTextSelection(data),Formats=data==null ? new string[0] : data.GetFormats(false)}));return;}
                 if(args.Length>1 && args[0]=="--title-probe"){var timer=Stopwatch.StartNew();string title=ChatTitleReader.Read(new IntPtr(Int64.Parse(args[1])));using(var output=new StreamWriter(Console.OpenStandardOutput(),new UTF8Encoding(false)))output.Write(new JavaScriptSerializer().Serialize(new{Title=title,Milliseconds=timer.ElapsedMilliseconds}));return;}
                 if (args.Length > 0 && args[0] == "--focus-test") { FocusTest(); return; }
                 if (args.Length > 0 && args[0] == "--copy-test") { CopyTest(); return; }
@@ -1156,6 +1175,11 @@ namespace ContentMover {
                 Assert(monitor.Renewals>=2,"鼠标监听定期重新注册成功");
             }
             var pdfCopy=new Clip{Text="两电平TP7组成的DQR&个低压"};string paper="其主要由 3 个两电平 VSC 组成的 FID";
+            var codeCopy=new DataObject();codeCopy.SetData("application/vnd.code.copyMetadata",false,"{\"isFromEmptySelection\":false}");Assert(CapturePolicy.IsCodeTextSelection(codeCopy),"VS Code 真实文字选区标记");
+            codeCopy.SetData("application/vnd.code.copyMetadata",false,"{\"isFromEmptySelection\":true}");Assert(!CapturePolicy.IsCodeTextSelection(codeCopy),"VS Code 无选区整行复制不触发入口");
+            var codePickle=new DataObject();codePickle.SetData("chromium/x-web-custom-data",false,new MemoryStream(Encoding.Unicode.GetBytes("application/vnd.code.copyMetadata\0{\"isFromEmptySelection\":false}")));Assert(CapturePolicy.IsCodeTextSelection(codePickle),"Windows Chromium 复制元数据格式");
+            var codeNative=new DataObject();codeNative.SetData("Chromium Web Custom MIME Data Format",false,new MemoryStream(Encoding.Unicode.GetBytes("application/vnd.code.copyMetadata\0{\"isFromEmptySelection\":false}")));Assert(CapturePolicy.IsCodeTextSelection(codeNative),"VS Code Windows 原生自定义剪贴板格式");
+            codeNative.SetData("Chromium Web Custom MIME Data Format",false,new MemoryStream(Encoding.Unicode.GetBytes("application/vnd.code.copyMetadata\0{\"isFromEmptySelection\":true}")));Assert(!CapturePolicy.IsCodeTextSelection(codeNative),"VS Code Windows 无选区整行复制被排除");
             Assert(CapturePolicy.UseFreshCopy(pdfCopy,paper) && pdfCopy.Text==paper && !pdfCopy.RequiresConfirmation,"应用复制覆盖PDF接口错误字符");
             Assert(CapturePolicy.UseAccessibilityFallback(pdfCopy,"未验证选区") && pdfCopy.RequiresConfirmation,"仅辅助功能读取时必须核对");
             using(var fixture=new Form())using(var edit=new TextBox{Multiline=true,Text=FixtureText,Dock=DockStyle.Fill}) {
