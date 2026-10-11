@@ -12,7 +12,7 @@ using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyProduct("内容迁移")]
-[assembly: System.Reflection.AssemblyVersion("1.2.12.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
 
 namespace ContentMover {
     static class AppIcon {
@@ -675,6 +675,7 @@ namespace ContentMover {
             var menu = new ContextMenuStrip();
             menu.Items.Add("打开摘录文件", null, delegate { OpenFile(); });
             menu.Items.Add("更改保存文件…", null, delegate { ChangeOutput(); });
+            menu.Items.Add("连接安卓手机…",null,delegate{try{Process.Start(new ProcessStartInfo(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"手机接收.exe")){UseShellExecute=true});}catch(Exception error){Error("手机接收未启动："+error.Message);}});
             var right = new ToolStripMenuItem("右键显示内容迁移") { Checked = settings.RightClickEnabled, CheckOnClick = true };
             right.CheckedChanged += delegate { settings.RightClickEnabled = right.Checked; floating.Hide(); SaveSettings(); }; menu.Items.Add(right);
             menu.Items.Add("设置 / 开机自启…", null, delegate { ShowSettings(); });

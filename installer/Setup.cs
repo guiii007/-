@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 [assembly: AssemblyProduct("内容迁移安装程序")]
-[assembly: AssemblyVersion("1.2.12.0")]
+[assembly: AssemblyVersion("1.3.0.0")]
 static class InstallCore {
     public const string RegistryPath=@"Software\Microsoft\Windows\CurrentVersion\Uninstall\ContentMover";
     public static readonly string DefaultPath=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","ContentMover");
@@ -38,7 +38,8 @@ static class InstallCore {
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern IntPtr FindWindow(string c,string t);
     public static void StopProduct() {
         if(FindWindow(null,"内容迁移 · 添加备注")!=IntPtr.Zero)throw new InvalidOperationException("请先保存或取消正在编辑的摘录，再继续安装。");
-        foreach(var process in Process.GetProcessesByName("内容迁移"))try {
+        foreach(var process in Process.GetProcesses())try {
+            if(process.ProcessName!="内容迁移" && process.ProcessName!="手机接收")continue;
             if(FileVersionInfo.GetVersionInfo(process.MainModule.FileName).ProductName=="内容迁移"){process.Kill();process.WaitForExit(3000);}
         }catch(InvalidOperationException){}catch(System.ComponentModel.Win32Exception){}
     }
@@ -61,7 +62,7 @@ static class InstallCore {
         if(startup)File.WriteAllText(StartupPath,"CreateObject(\"WScript.Shell\").Run Chr(34) & \""+app.Replace("\"","\"\"")+"\" & Chr(34), 0, False\r\n",Encoding.Unicode);
         else if(File.Exists(StartupPath))File.Delete(StartupPath);
         using(var key=Registry.CurrentUser.CreateSubKey(RegistryPath)) {
-            key.SetValue("DisplayName","内容迁移");key.SetValue("DisplayVersion","1.2.12");key.SetValue("Publisher","guiii007");key.SetValue("InstallLocation",root);
+            key.SetValue("DisplayName","内容迁移");key.SetValue("DisplayVersion","1.3.0");key.SetValue("Publisher","guiii007");key.SetValue("InstallLocation",root);
             key.SetValue("UninstallString","\""+uninstall+"\" --uninstall");key.SetValue("DisplayIcon",app+",0");key.SetValue("NoModify",1);key.SetValue("NoRepair",1);
         }
     }

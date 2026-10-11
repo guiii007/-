@@ -7,3 +7,7 @@ github-publish/
 dist/
 tools/
 *.status.json
+backups/
+mobile/toolchain/
+mobile/.signing/
+mobile/android/build/
