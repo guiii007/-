@@ -1,10 +1,10 @@
-param([string]$DesktopExecutable='内容迁移.exe')
+param([string]$DesktopExecutable='内容迁移.exe',[string]$ReceiverExecutable='手机接收.exe')
 $ErrorActionPreference = 'Stop'
 $rootPath = $PSScriptRoot
 $stagePath = Join-Path $rootPath 'dist\内容迁移-Windows'
 New-Item -ItemType Directory -Path $stagePath -Force | Out-Null
-foreach ($name in @('内容迁移.exe','手机接收.exe','启动内容迁移.vbs','README.md','使用说明.md','手机使用说明.md')) {
-    $sourceName=if($name -eq '内容迁移.exe'){$DesktopExecutable}else{$name}
+foreach ($name in @('内容迁移.exe','手机接收.exe','启动内容迁移.vbs','README.md','使用说明.md','手机使用说明.md','远程连接说明.md')) {
+    $sourceName=if($name -eq '内容迁移.exe'){$DesktopExecutable}elseif($name -eq '手机接收.exe'){$ReceiverExecutable}else{$name}
     Copy-Item -LiteralPath (Join-Path $rootPath $sourceName) -Destination (Join-Path $stagePath $name) -Force
 }
 New-Item -ItemType Directory -Path (Join-Path $stagePath 'assets') -Force | Out-Null

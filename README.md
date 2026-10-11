@@ -30,11 +30,11 @@ Word 尝试记录文档路径、页码和字符位置；浏览器尝试读取网
 
 升级后新摘录保存到 `.md`，原来的 TXT 保留，内容不会自动导入。默认文件已存在时继续追加；删除默认文件后按当天日期重建。自定义 TXT 路径升级为同名 MD。
 
-## 安卓手机迁移（同一 Wi-Fi）
+## 安卓手机迁移（局域网与远程）
 
 安卓第一版接收选中文字、单张或多张截图，经扫码配对发送到电脑桌面的日期 Markdown 文件。电脑托盘菜单 → **连接安卓手机…**。手机安装 `ContentMover-Android.apk`，然后在选区菜单或分享列表选择“内容迁移”。离线内容先保存在手机，恢复连接后重试。详见 [手机使用说明](手机使用说明.md)。不使用云服务器，原桌面版仍可独立使用。
 
-第一版为预发布测试版：[安卓 APK](https://github.com/guiii007/content-mover/releases/download/v1.3.0-beta.2/ContentMover-Android.apk)、[配套 Windows 安装程序](https://github.com/guiii007/content-mover/releases/download/v1.3.0-beta.1/ContentMoverSetup.exe)。上方稳定版下载仍保留 v1.2.12。
+远程连接测试版：[安卓 1.1.0 APK](https://github.com/guiii007/content-mover/releases/download/v1.3.0-beta.3/ContentMover-Android.apk)、[配套 Windows 安装程序](https://github.com/guiii007/content-mover/releases/download/v1.3.0-beta.3/ContentMoverSetup.exe)。两端安装 Tailscale 并登录同一账号后，手机用流量也能发送到电脑桌面。详见 [远程连接说明](远程连接说明.md)。原局域网版本 beta.2 与稳定桌面版 v1.2.12 下载保留。跨网络实测需完成两端登录后进行。
 
 ## 设置与卸载
 

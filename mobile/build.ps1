@@ -1,13 +1,13 @@
-param([switch]$SkipAndroid,[switch]$SkipDesktop)
+param([switch]$SkipAndroid,[switch]$SkipDesktop,[string]$ReceiverExecutable="手机接收.exe")
 $ErrorActionPreference='Stop'
 $rootPath=Split-Path -Parent $PSScriptRoot
 if(-not $SkipDesktop){
 $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 $qrAssembly=Join-Path $PSScriptRoot 'toolchain\zxing-net\lib\net40\zxing.dll'
 $references=@('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Web.Extensions.dll','Microsoft.CSharp.dll',(Join-Path $framework 'WPF\UIAutomationClient.dll'),(Join-Path $framework 'WPF\UIAutomationTypes.dll'),(Join-Path $framework 'WPF\WindowsBase.dll'),$qrAssembly)
-$argsList=@('/nologo','/target:winexe','/platform:x64','/optimize+','/main:ContentMover.MobileProgram',('/out:'+(Join-Path $rootPath '手机接收.exe')),('/win32icon:'+(Join-Path $rootPath 'assets\content-mover.ico')),('/resource:'+$qrAssembly+',zxing.dll'))
+$argsList=@('/nologo','/target:winexe','/platform:x64','/optimize+','/main:ContentMover.MobileProgram',('/out:'+(Join-Path $rootPath $ReceiverExecutable)),('/win32icon:'+(Join-Path $rootPath 'assets\content-mover.ico')),('/resource:'+$qrAssembly+',zxing.dll'))
 foreach($reference in $references){$argsList+='/reference:'+$reference}
-$argsList+=@((Join-Path $rootPath 'ContentMover.cs'),(Join-Path $PSScriptRoot 'desktop\MobileReceiver.cs'),(Join-Path $PSScriptRoot 'desktop\MobileTests.cs'))
+$argsList+=@((Join-Path $rootPath 'ContentMover.cs'),(Join-Path $PSScriptRoot 'desktop\PairingForm.cs'),(Join-Path $PSScriptRoot 'desktop\MobileReceiver.cs'),(Join-Path $PSScriptRoot 'desktop\MobileTests.cs'))
 & (Join-Path $framework 'csc.exe') @argsList
 if($LASTEXITCODE -ne 0){throw '手机接收编译失败'}
 }
