@@ -1,6 +1,7 @@
-param([switch]$SkipAndroid)
+param([switch]$SkipAndroid,[switch]$SkipDesktop)
 $ErrorActionPreference='Stop'
 $rootPath=Split-Path -Parent $PSScriptRoot
+if(-not $SkipDesktop){
 $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 $qrAssembly=Join-Path $PSScriptRoot 'toolchain\zxing-net\lib\net40\zxing.dll'
 $references=@('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Web.Extensions.dll','Microsoft.CSharp.dll',(Join-Path $framework 'WPF\UIAutomationClient.dll'),(Join-Path $framework 'WPF\UIAutomationTypes.dll'),(Join-Path $framework 'WPF\WindowsBase.dll'),$qrAssembly)
@@ -9,6 +10,7 @@ foreach($reference in $references){$argsList+='/reference:'+$reference}
 $argsList+=@((Join-Path $rootPath 'ContentMover.cs'),(Join-Path $PSScriptRoot 'desktop\MobileReceiver.cs'),(Join-Path $PSScriptRoot 'desktop\MobileTests.cs'))
 & (Join-Path $framework 'csc.exe') @argsList
 if($LASTEXITCODE -ne 0){throw '手机接收编译失败'}
+}
 if($SkipAndroid){exit 0}
 $jdkPath=(Get-ChildItem (Join-Path $PSScriptRoot 'toolchain\jdk') -Directory | Select-Object -First 1).FullName
 $buildTools=(Get-ChildItem (Join-Path $PSScriptRoot 'toolchain\build-tools') -Directory | Select-Object -First 1).FullName

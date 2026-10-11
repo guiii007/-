@@ -34,7 +34,7 @@ Word 尝试记录文档路径、页码和字符位置；浏览器尝试读取网
 
 安卓第一版接收选中文字、单张或多张截图，经扫码配对发送到电脑桌面的日期 Markdown 文件。电脑托盘菜单 → **连接安卓手机…**。手机安装 `ContentMover-Android.apk`，然后在选区菜单或分享列表选择“内容迁移”。离线内容先保存在手机，恢复连接后重试。详见 [手机使用说明](手机使用说明.md)。不使用云服务器，原桌面版仍可独立使用。
 
-第一版为预发布测试版：[安卓 APK](https://github.com/guiii007/content-mover/releases/download/v1.3.0-beta.1/ContentMover-Android.apk)、[配套 Windows 安装程序](https://github.com/guiii007/content-mover/releases/download/v1.3.0-beta.1/ContentMoverSetup.exe)。上方稳定版下载仍保留 v1.2.12。
+第一版为预发布测试版：[安卓 APK](https://github.com/guiii007/content-mover/releases/download/v1.3.0-beta.2/ContentMover-Android.apk)、[配套 Windows 安装程序](https://github.com/guiii007/content-mover/releases/download/v1.3.0-beta.1/ContentMoverSetup.exe)。上方稳定版下载仍保留 v1.2.12。
 
 ## 设置与卸载
 
